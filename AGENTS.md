@@ -1,3 +1,7 @@
+<p align="center">
+![Snoopy](assets/snoopy-500.jpg)
+</p>
+
 ## Summary
 
 **Snoopy** is a Go program that provides **continuous screen recording and web-based streaming** for GNOME-based Linux systems. Here's what it does:
