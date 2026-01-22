@@ -137,6 +137,8 @@ func (as *AvahiService) advertise() error {
 	err := as.tryAdvertise(as.baseName)
 	if err != nil {
 		// If registration failed, try with IP suffix
+		// Note: We retry on any error since Avahi doesn't provide specific collision error codes
+		// through D-Bus. This is a reasonable fallback for most error scenarios.
 		log.Printf("Avahi: failed to register with name '%s': %v", as.baseName, err)
 		ipSuffix := as.getIPSuffix()
 		if ipSuffix != "" {
@@ -196,7 +198,9 @@ func (as *AvahiService) tryAdvertise(name string) error {
 	err = entryGroup.Call(avahiEntryGroupIface+".Commit", 0).Err
 	if err != nil {
 		// Reset the entry group before returning error
-		entryGroup.Call(avahiEntryGroupIface+".Reset", 0)
+		if resetErr := entryGroup.Call(avahiEntryGroupIface+".Reset", 0).Err; resetErr != nil {
+			log.Printf("Avahi: warning - failed to reset entry group: %v", resetErr)
+		}
 		return fmt.Errorf("commit entry group: %w", err)
 	}
 
