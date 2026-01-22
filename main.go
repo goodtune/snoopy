@@ -212,7 +212,13 @@ func main() {
 	go startHTTPServer(*addr, *port, imageCache, broadcaster)
 
 	// Start screen capture loop for web streaming
-	go startScreenCaptureLoop(imageCache, broadcaster, *imageInterval, *outDir)
+	// Check if ffmpeg is available
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		log.Printf("Warning: ffmpeg not found in PATH - web streaming will show static waiting image")
+		log.Printf("Install ffmpeg to enable live screen streaming feature")
+	} else {
+		go startScreenCaptureLoop(imageCache, broadcaster, *imageInterval, *outDir)
+	}
 
 	// Connect to the *session* bus (this must run in the logged-in user session).
 	conn, err := dbus.ConnectSessionBus()
@@ -286,6 +292,7 @@ func startScreenCaptureLoop(cache *ImageCache, broadcaster *SSEBroadcaster, inte
 		// Extract a frame from the video using ffmpeg
 		// Use -sseof to seek from the end, getting a recent frame
 		cmd := exec.Command("ffmpeg",
+			"-loglevel", "error", // Only show errors
 			"-sseof", "-3", // Seek to 3 seconds before end of file
 			"-i", videoFile,
 			"-frames:v", "1", // Extract 1 frame
@@ -299,7 +306,10 @@ func startScreenCaptureLoop(cache *ImageCache, broadcaster *SSEBroadcaster, inte
 		cmd.Stderr = &stderr
 
 		if err := cmd.Run(); err != nil {
-			log.Printf("Failed to extract frame from video: %v, stderr: %s", err, stderr.String())
+			log.Printf("Failed to extract frame from %s: %v", filepath.Base(videoFile), err)
+			if stderr.Len() > 0 {
+				log.Printf("ffmpeg error: %s", stderr.String())
+			}
 			continue
 		}
 
@@ -343,8 +353,9 @@ func findMostRecentVideo(dir string) (string, error) {
 		}
 
 		name := entry.Name()
-		// Look for .webm files (GNOME Shell default format)
-		if filepath.Ext(name) != ".webm" {
+		// Look for video files (mp4 or webm)
+		ext := filepath.Ext(name)
+		if ext != ".mp4" && ext != ".webm" {
 			continue
 		}
 

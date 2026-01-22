@@ -40,11 +40,18 @@
 ### Technical Details
 - Written in Go
 - Uses D-Bus to communicate with GNOME Shell's Screencast interface for video recording
-- Uses `gnome-screenshot` for periodic image captures for web streaming
-- Outputs video files in WebM format (GNOME Shell default)
+- Extracts frames from recorded video files (MP4/WebM) using ffmpeg for web streaming
+- Outputs video files in MP4 or WebM format (GNOME Shell configurable)
 - Web streaming uses JPEG format for real-time compatibility
 - Built-in HTTP server with SSE support for real-time streaming
 - Designed to run as a user session service on Linux systems with GNOME
+
+### Dependencies
+- **Required**: GNOME Shell with Screencast support (for video recording)
+- **Optional**: ffmpeg (for web streaming feature)
+  - If ffmpeg is not available, video recording still works normally
+  - Web interface will display a static "waiting" image
+  - Install ffmpeg to enable live frame streaming: `apt install ffmpeg` or `dnf install ffmpeg`
 
 ### API Endpoints
 - `GET /`: Main web interface (HTML page with live stream viewer)
