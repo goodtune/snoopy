@@ -9,6 +9,7 @@ import (
 	"image/color"
 	"image/draw"
 	"image/jpeg"
+	"image/png"
 	"log"
 	"net/http"
 	"os"
@@ -96,7 +97,7 @@ func newImageCache(dir string, maxImages int) (*ImageCache, error) {
 		return nil, err
 	}
 	ic.waitingImg = waitingPath
-	ic.latest = waitingPath
+	ic.latest = "waiting.jpg"
 
 	return ic, nil
 }
@@ -273,18 +274,43 @@ func startScreenCaptureLoop(cache *ImageCache, broadcaster *SSEBroadcaster, inte
 	defer ticker.Stop()
 
 	for range ticker.C {
-		// Capture screenshot using gnome-screenshot
-		cmd := exec.Command("gnome-screenshot", "-f", "-")
-		var out bytes.Buffer
-		cmd.Stdout = &out
+		// Create temp file for screenshot
+		tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("snoopy-screenshot-%d.png", time.Now().UnixNano()))
 
+		// Capture screenshot using gnome-screenshot
+		cmd := exec.Command("gnome-screenshot", "-f", tmpFile)
 		if err := cmd.Run(); err != nil {
 			log.Printf("Failed to capture screenshot: %v", err)
 			continue
 		}
 
+		// Read the screenshot file
+		pngData, err := os.ReadFile(tmpFile)
+		if err != nil {
+			log.Printf("Failed to read screenshot: %v", err)
+			os.Remove(tmpFile)
+			continue
+		}
+
+		// Remove temp file
+		os.Remove(tmpFile)
+
+		// Decode PNG
+		img, err := png.Decode(bytes.NewReader(pngData))
+		if err != nil {
+			log.Printf("Failed to decode PNG: %v", err)
+			continue
+		}
+
+		// Encode as JPEG
+		var jpegBuf bytes.Buffer
+		if err := jpeg.Encode(&jpegBuf, img, &jpeg.Options{Quality: 85}); err != nil {
+			log.Printf("Failed to encode JPEG: %v", err)
+			continue
+		}
+
 		// Add to cache
-		filename, err := cache.addImage(out.Bytes())
+		filename, err := cache.addImage(jpegBuf.Bytes())
 		if err != nil {
 			log.Printf("Failed to save screenshot: %v", err)
 			continue
@@ -293,6 +319,7 @@ func startScreenCaptureLoop(cache *ImageCache, broadcaster *SSEBroadcaster, inte
 		// Broadcast to SSE clients
 		imageURL := fmt.Sprintf("/images/%s", filename)
 		broadcaster.broadcast(imageURL)
+		log.Printf("Captured and broadcast image: %s", filename)
 	}
 }
 
