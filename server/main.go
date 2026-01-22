@@ -93,10 +93,11 @@ func (b *SSEBroadcaster) broadcast(msg string) {
 
 // AvahiService manages the Avahi mDNS service advertisement
 type AvahiService struct {
-	conn       *dbus.Conn
-	entryGroup dbus.ObjectPath
-	baseName   string
-	port       int
+	conn        *dbus.Conn
+	entryGroup  dbus.ObjectPath
+	baseName    string
+	serviceName string
+	port        int
 }
 
 // newAvahiService creates and advertises a new Avahi service
@@ -148,6 +149,7 @@ func (as *AvahiService) advertise() error {
 	if ipSuffix != "" {
 		serviceName = fmt.Sprintf("%s [%s]", as.baseName, ipSuffix)
 	}
+	as.serviceName = serviceName
 
 	// Prepare TXT records
 	txtRecords := as.prepareTXTRecords()
@@ -234,6 +236,11 @@ func (as *AvahiService) Close() error {
 		entryGroup.Call(avahiEntryGroupIface+".Free", 0)
 	}
 	return as.conn.Close()
+}
+
+// GetServiceName returns the advertised service name
+func (as *AvahiService) GetServiceName() string {
+	return as.serviceName
 }
 
 func newImageCache(dir string, maxImages int) (*ImageCache, error) {
@@ -333,7 +340,7 @@ func (ic *ImageCache) getImagePath(filename string) string {
 
 func main() {
 	var (
-		outDir         = flag.String("out", "", "Output directory (default: ~/Videos/screencapture)")
+		outDir         = flag.String("out", "", "Output directory (default: ~/.cache/snoopy/video)")
 		segment        = flag.Duration("segment", 30*time.Minute, "Segment duration")
 		pause          = flag.Duration("pause", 1*time.Second, "Pause between segments")
 		template       = flag.String("template", "screen-%d-%t.webm", "Filename template used by GNOME Shell")
@@ -349,7 +356,7 @@ func main() {
 		log.Fatalf("UserHomeDir: %v", err)
 	}
 	if *outDir == "" {
-		*outDir = filepath.Join(home, "Videos", "screencapture")
+		*outDir = filepath.Join(home, ".cache", "snoopy", "video")
 	}
 	if err := os.MkdirAll(*outDir, 0o755); err != nil {
 		log.Fatalf("mkdir %s: %v", *outDir, err)
@@ -365,8 +372,15 @@ func main() {
 	// Setup SSE broadcaster
 	broadcaster := newSSEBroadcaster()
 
+	// Get username for default service name
+	username := os.Getenv("USER")
+	if username == "" {
+		username = "unknown"
+	}
+	serviceName := fmt.Sprintf("Snoopy (%s)", username)
+
 	// Start HTTP server
-	go startHTTPServer(*addr, *port, imageCache, broadcaster)
+	go startHTTPServer(*addr, *port, imageCache, broadcaster, serviceName)
 
 	// Start screen capture loop for web streaming
 	// Check if ffmpeg is available
@@ -384,6 +398,7 @@ func main() {
 		log.Printf("Service will not be advertised via mDNS/Bonjour")
 	} else {
 		defer avahiService.Close()
+		serviceName = avahiService.GetServiceName()
 		log.Printf("Avahi service started successfully")
 	}
 
@@ -577,7 +592,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func startHTTPServer(addr string, port int, cache *ImageCache, broadcaster *SSEBroadcaster) {
+func startHTTPServer(addr string, port int, cache *ImageCache, broadcaster *SSEBroadcaster, serviceName string) {
 	mux := http.NewServeMux()
 
 	// Serve static HTML at /
@@ -586,7 +601,7 @@ func startHTTPServer(addr string, port int, cache *ImageCache, broadcaster *SSEB
 			http.NotFound(w, r)
 			return
 		}
-		serveIndexHTML(w, r)
+		serveIndexHTML(w, r, serviceName)
 	})
 
 	// SSE endpoint
@@ -610,8 +625,8 @@ func startHTTPServer(addr string, port int, cache *ImageCache, broadcaster *SSEB
 	}
 }
 
-func serveIndexHTML(w http.ResponseWriter, r *http.Request) {
-	html := `<!DOCTYPE html>
+func serveIndexHTML(w http.ResponseWriter, r *http.Request, serviceName string) {
+	html := fmt.Sprintf(`<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -663,7 +678,7 @@ func serveIndexHTML(w http.ResponseWriter, r *http.Request) {
     </style>
 </head>
 <body>
-    <h1>Snoopy Screen Stream</h1>
+    <h1>%s</h1>
     <div class="status" id="status">Connecting...</div>
     <div class="container">
         <img id="screen" alt="Screen capture">
@@ -704,7 +719,7 @@ func serveIndexHTML(w http.ResponseWriter, r *http.Request) {
         };
     </script>
 </body>
-</html>`
+</html>`, serviceName)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(html))

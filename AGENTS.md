@@ -1,5 +1,5 @@
 <p align="center">
-![Snoopy](assets/snoopy-500.jpg)
+   <img src="assets/snoopy-500.jpg" width="350" />
 </p>
 
 ## Summary

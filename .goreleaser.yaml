@@ -1,0 +1,169 @@
+version: 2
+
+# Main build configuration
+builds:
+  - id: snoopy
+    main: .
+    binary: snoopy
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+    targets:
+      - linux_amd64
+      - linux_arm64
+
+# Archive configuration for GitHub releases
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    files:
+      - AGENTS.md
+      - assets/snoopy-500.jpg
+      - snoopy.service
+
+# Linux packages (RPM only)
+nfpms:
+  - id: snoopy-packages
+    package_name: snoopy
+    ids:
+      - snoopy
+    file_name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+    vendor: GoodTune
+    homepage: https://github.com/goodtune/snoopy
+    maintainer: GoodTune <snoopy@goodtune.io>
+    description: |
+      Snoopy - Continuous screen recording and web-based streaming for GNOME-based Linux systems.
+      Provides automated screencast recording in segments by interfacing with GNOME Shell's
+      screencast D-Bus API, with real-time web streaming via HTTP Server-Sent Events (SSE).
+    license: MIT
+    section: utils
+    formats:
+      - rpm
+    bindir: /usr/bin
+
+    # Package contents
+    contents:
+      # Binary (already included by default in bindir)
+
+      # Systemd service file
+      - src: snoopy.service
+        dst: /usr/lib/systemd/user/snoopy.service
+        file_info:
+          mode: 0644
+
+      # Branding asset
+      - src: assets/snoopy-500.jpg
+        dst: /usr/share/snoopy/assets/snoopy-500.jpg
+        file_info:
+          mode: 0644
+
+      # Documentation
+      - src: AGENTS.md
+        dst: /usr/share/doc/snoopy/README.md
+        file_info:
+          mode: 0644
+
+    # Scripts
+    scripts:
+      postinstall: scripts/postinstall.sh
+      preremove: scripts/preremove.sh
+
+    # Dependencies
+    recommends:
+      - ffmpeg
+
+    # RPM-specific
+    rpm:
+      group: Applications/Multimedia
+      summary: Continuous screen recording with web streaming for GNOME
+      compression: lzma
+
+# Checksum configuration
+checksum:
+  name_template: 'checksums.txt'
+  algorithm: sha256
+
+# Snapshot configuration for non-tagged builds
+snapshot:
+  version_template: "{{ .Version }}-next"
+
+# Changelog configuration
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^ci:'
+      - '^chore:'
+      - 'merge conflict'
+      - Merge pull request
+      - Merge remote-tracking branch
+      - Merge branch
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: 'Bug Fixes'
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: 'Security Updates'
+      regexp: '^.*?sec(\([[:word:]]+\))??!?:.+$'
+      order: 2
+    - title: 'Performance Improvements'
+      regexp: '^.*?perf(\([[:word:]]+\))??!?:.+$'
+      order: 3
+    - title: Others
+      order: 999
+
+# GitHub release configuration
+release:
+  github:
+    owner: goodtune
+    name: snoopy
+  draft: false
+  prerelease: auto
+  mode: append
+  header: |
+    ## Snoopy {{ .Version }}
+
+    Continuous screen recording and web-based streaming for GNOME-based Linux systems.
+
+    ### Installation
+
+    #### Linux (RPM-based: RHEL/CentOS/Fedora)
+    ```bash
+    wget https://github.com/goodtune/snoopy/releases/download/{{ .Tag }}/snoopy_{{ .Version }}_linux_x86_64.rpm
+    sudo rpm -i snoopy_{{ .Version }}_linux_x86_64.rpm
+    # Enable and start the service (user session)
+    systemctl --user enable --now snoopy.service
+    ```
+
+    #### Binary Installation
+    ```bash
+    wget https://github.com/goodtune/snoopy/releases/download/{{ .Tag }}/snoopy_{{ .Version }}_Linux_x86_64.tar.gz
+    tar -xzf snoopy_{{ .Version }}_Linux_x86_64.tar.gz
+    sudo install -m 755 snoopy /usr/bin/
+    ```
+
+    ### What's Changed
+  footer: |
+    **Full Changelog**: https://github.com/goodtune/snoopy/compare/{{ .PreviousTag }}...{{ .Tag }}
