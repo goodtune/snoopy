@@ -1,0 +1,13 @@
+[Unit]
+Description=GNOME Screencast loop (30-minute segments)
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/screencast-loop -segment 30m
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
