@@ -28,5 +28,11 @@
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Snoopy needs access to your local network to discover and connect to Snoopy servers via Bonjour/mDNS</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_snoopy._tcp</string>
+	</array>
 </dict>
 </plist>

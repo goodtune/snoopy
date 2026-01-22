@@ -11,7 +11,7 @@ class SnoopyService {
     required this.txt,
   });
 
-  String get sseUrl => 'http://$hostname:$port/sse';
+  String get sseUrl => 'http://$hostname:$port/sse/image';
 
   String imageUrl(String imageId) => 'http://$hostname:$port/images/$imageId';
 

@@ -1,6 +1,8 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:image_gallery_saver/image_gallery_saver.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:path_provider/path_provider.dart';
 import '../models/snoopy_service.dart';
 import '../models/cached_image.dart';
 import '../services/sse_service.dart';
@@ -62,30 +64,90 @@ class _ViewerScreenState extends State<ViewerScreen> {
   Future<void> _saveCurrentImage() async {
     if (_images.isEmpty) return;
 
-    final status = await Permission.photos.request();
-    if (status.isGranted) {
-      final currentImage = _images[_currentIndex];
-      final result = await ImageGallerySaver.saveImage(
-        currentImage.imageData,
-        name: currentImage.fileName,
-      );
+    final currentImage = _images[_currentIndex];
 
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              result['isSuccess'] ? 'Image saved to gallery' : 'Failed to save image',
+    // Check platform
+    if (Platform.isMacOS || Platform.isWindows || Platform.isLinux) {
+      // Desktop: Save to Downloads folder
+      try {
+        final downloadsDir = await getDownloadsDirectory();
+        if (downloadsDir != null) {
+          // Clean up the filename - remove path separators and ensure single extension
+          String cleanFileName = currentImage.imageId
+              .replaceAll('/', '_')
+              .replaceAll('\\', '_');
+
+          // Ensure .jpg extension (and avoid double extension)
+          if (!cleanFileName.endsWith('.jpg')) {
+            cleanFileName = '$cleanFileName.jpg';
+          }
+
+          final filePath = '${downloadsDir.path}/$cleanFileName';
+          final file = File(filePath);
+          await file.writeAsBytes(currentImage.imageData);
+
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Image saved to Downloads: $cleanFileName'),
+                duration: const Duration(seconds: 2),
+              ),
+            );
+          }
+        } else {
+          throw Exception('Could not access Downloads directory');
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Failed to save image: $e'),
+              duration: const Duration(seconds: 3),
             ),
-          ),
-        );
+          );
+        }
       }
     } else {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Permission denied to save images'),
-          ),
+      // Mobile (iOS/Android): Use image_gallery_saver with permissions
+      final status = await Permission.photosAddOnly.request();
+
+      if (status.isGranted || status.isLimited) {
+        final result = await ImageGallerySaver.saveImage(
+          currentImage.imageData,
+          name: currentImage.fileName,
         );
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                result['isSuccess']
+                    ? 'Image saved to gallery'
+                    : 'Failed to save image',
+              ),
+            ),
+          );
+        }
+      } else if (status.isPermanentlyDenied) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: const Text(
+                'Permission permanently denied. Please enable in Settings.',
+              ),
+              action: SnackBarAction(
+                label: 'Settings',
+                onPressed: () => openAppSettings(),
+              ),
+            ),
+          );
+        }
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Permission denied to save images')),
+          );
+        }
       }
     }
   }
@@ -183,7 +245,10 @@ class _ViewerScreenState extends State<ViewerScreen> {
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
                         IconButton(
-                          icon: const Icon(Icons.arrow_back, color: Colors.white),
+                          icon: const Icon(
+                            Icons.arrow_back,
+                            color: Colors.white,
+                          ),
                           onPressed: _currentIndex < _images.length - 1
                               ? () => _navigateToImage(1)
                               : null,
@@ -195,7 +260,10 @@ class _ViewerScreenState extends State<ViewerScreen> {
                         ),
                         const SizedBox(width: 16),
                         IconButton(
-                          icon: const Icon(Icons.arrow_forward, color: Colors.white),
+                          icon: const Icon(
+                            Icons.arrow_forward,
+                            color: Colors.white,
+                          ),
                           onPressed: _currentIndex > 0
                               ? () => _navigateToImage(-1)
                               : null,

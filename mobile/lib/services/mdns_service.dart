@@ -1,9 +1,10 @@
 import 'dart:async';
-import 'package:nsd/nsd.dart';
+import 'dart:io';
+import 'package:nsd/nsd.dart' as nsd;
 import '../models/snoopy_service.dart';
 
 class MdnsService {
-  final Discovery _discovery = Discovery();
+  nsd.Discovery? _discovery;
   final Map<String, SnoopyService> _services = {};
   final StreamController<List<SnoopyService>> _servicesController =
       StreamController<List<SnoopyService>>.broadcast();
@@ -12,28 +13,77 @@ class MdnsService {
   List<SnoopyService> get services => _services.values.toList();
 
   Future<void> startDiscovery() async {
-    await _discovery.discover('_snoopy._tcp').listen((serviceInfo) async {
-      if (serviceInfo.name != null) {
-        // Resolve the service to get full details
-        final resolvedService = await _discovery.resolve(serviceInfo);
+    _discovery = await nsd.startDiscovery('_snoopy._tcp', autoResolve: true);
 
-        if (resolvedService.host != null && resolvedService.port != null) {
-          final service = SnoopyService(
-            name: resolvedService.name ?? 'Unknown',
-            hostname: resolvedService.host!,
-            port: resolvedService.port!,
-            txt: resolvedService.txt ?? {},
+    _discovery!.addServiceListener((service, status) async {
+      if (status == nsd.ServiceStatus.found && service.name != null) {
+        try {
+          // Debug logging
+          print('mDNS Service found: ${service.name}');
+          print('  Host: ${service.host}');
+          print('  Port: ${service.port}');
+          print(
+            '  Addresses: ${service.addresses?.map((a) => a.address).toList()}',
           );
 
-          _services[service.name] = service;
-          _servicesController.add(_services.values.toList());
+          // Service should already be resolved due to autoResolve: true
+          if (service.port != null) {
+            // Prefer IP address over hostname for better reliability
+            String? hostname;
+            if (service.addresses != null && service.addresses!.isNotEmpty) {
+              hostname = service.addresses!.first.address;
+              print('  Using IP address: $hostname');
+            } else if (service.host != null) {
+              // Strip trailing dot from hostname
+              final cleanHost = service.host!.replaceAll(RegExp(r'\.$'), '');
+
+              // Try to resolve hostname to IP address
+              try {
+                final addresses = await InternetAddress.lookup(cleanHost);
+                if (addresses.isNotEmpty) {
+                  hostname = addresses.first.address;
+                  print('  Resolved $cleanHost to IP: $hostname');
+                } else {
+                  hostname = cleanHost;
+                  print('  Using hostname (resolution failed): $hostname');
+                }
+              } catch (e) {
+                hostname = cleanHost;
+                print('  Using hostname (resolution error: $e): $hostname');
+              }
+            }
+
+            if (hostname != null) {
+              final snoopyService = SnoopyService(
+                name: service.name ?? 'Unknown',
+                hostname: hostname,
+                port: service.port!,
+                txt:
+                    service.txt?.map(
+                      (key, value) => MapEntry(key, value.toString()),
+                    ) ??
+                    {},
+              );
+
+              _services[snoopyService.name] = snoopyService;
+              _servicesController.add(_services.values.toList());
+            }
+          }
+        } catch (e) {
+          print('Error processing service: $e');
         }
+      } else if (status == nsd.ServiceStatus.lost && service.name != null) {
+        _services.remove(service.name);
+        _servicesController.add(_services.values.toList());
       }
-    }).asFuture();
+    });
   }
 
   Future<void> stopDiscovery() async {
-    await _discovery.stopDiscovery();
+    if (_discovery != null) {
+      await nsd.stopDiscovery(_discovery!);
+      _discovery = null;
+    }
   }
 
   void dispose() {

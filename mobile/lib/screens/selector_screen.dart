@@ -60,9 +60,7 @@ class _SelectorScreenState extends State<SelectorScreen> {
             onPressed: () {
               Navigator.push(
                 context,
-                MaterialPageRoute(
-                  builder: (context) => const CleanupScreen(),
-                ),
+                MaterialPageRoute(builder: (context) => const CleanupScreen()),
               );
             },
           ),
@@ -109,27 +107,24 @@ class _SelectorScreenState extends State<SelectorScreen> {
       );
     }
 
-    return GridView.builder(
+    return ListView.builder(
       padding: const EdgeInsets.all(16),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 2,
-        crossAxisSpacing: 16,
-        mainAxisSpacing: 16,
-        childAspectRatio: 0.75,
-      ),
       itemCount: _services.length,
       itemBuilder: (context, index) {
         final service = _services[index];
-        return ServiceTile(
-          service: service,
-          onTap: () {
-            Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (context) => ViewerScreen(service: service),
-              ),
-            );
-          },
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 16),
+          child: ServiceTile(
+            service: service,
+            onTap: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => ViewerScreen(service: service),
+                ),
+              );
+            },
+          ),
         );
       },
     );
