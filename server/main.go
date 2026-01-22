@@ -114,7 +114,7 @@ func newAvahiService(port int) (*AvahiService, error) {
 		username = "unknown"
 	}
 
-	baseName := fmt.Sprintf("Snoopy (%s)", username)
+	baseName := username
 
 	as := &AvahiService{
 		conn:     conn,
@@ -377,7 +377,7 @@ func main() {
 	if username == "" {
 		username = "unknown"
 	}
-	serviceName := fmt.Sprintf("Snoopy (%s)", username)
+	serviceName := username
 
 	// Start HTTP server
 	go startHTTPServer(*addr, *port, imageCache, broadcaster, serviceName)
