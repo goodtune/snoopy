@@ -36,12 +36,12 @@ const (
 	stopMethod  = iface + ".StopScreencast"
 
 	// Avahi constants
-	avahiDest              = "org.freedesktop.Avahi"
-	avahiServerPath        = "/"
-	avahiServerIface       = "org.freedesktop.Avahi.Server"
-	avahiEntryGroupIface   = "org.freedesktop.Avahi.EntryGroup"
-	avahiIfaceUnspec int32 = -1
-	avahiProtoUnspec int32 = -1
+	avahiDest                  = "org.freedesktop.Avahi"
+	avahiServerPath            = "/"
+	avahiServerIface           = "org.freedesktop.Avahi.Server"
+	avahiEntryGroupIface       = "org.freedesktop.Avahi.EntryGroup"
+	avahiIfaceUnspec     int32 = -1
+	avahiProtoUnspec     int32 = -1
 )
 
 // ImageCache manages the image cache directory and provides access to images
@@ -187,6 +187,7 @@ func (as *AvahiService) prepareTXTRecords() [][]byte {
 		"ver=1.0.0",
 		"proto=http",
 		"path=/",
+		"sse=/sse/image",
 		"caps=stream,screencast",
 	}
 
@@ -268,7 +269,7 @@ func (ic *ImageCache) createWaitingImage(path string) error {
 	text := "Waiting for next screen capture"
 	point := fixed.Point26_6{
 		X: fixed.I(800/2 - len(text)*7/2),
-		Y: fixed.I(600/2),
+		Y: fixed.I(600 / 2),
 	}
 
 	d := &font.Drawer{

@@ -44,6 +44,7 @@
 - Outputs video files in MP4 or WebM format (GNOME Shell configurable)
 - Web streaming uses JPEG format for real-time compatibility
 - Built-in HTTP server with SSE support for real-time streaming
+- Advertises via Avahi with TXT records including `path=/` and `sse=/sse/image`
 - Designed to run as a user session service on Linux systems with GNOME
 
 ### Dependencies
