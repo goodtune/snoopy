@@ -9,7 +9,6 @@ import (
 	"image/color"
 	"image/draw"
 	"image/jpeg"
-	"image/png"
 	"log"
 	"net/http"
 	"os"
@@ -213,7 +212,7 @@ func main() {
 	go startHTTPServer(*addr, *port, imageCache, broadcaster)
 
 	// Start screen capture loop for web streaming
-	go startScreenCaptureLoop(imageCache, broadcaster, *imageInterval)
+	go startScreenCaptureLoop(imageCache, broadcaster, *imageInterval, *outDir)
 
 	// Connect to the *session* bus (this must run in the logged-in user session).
 	conn, err := dbus.ConnectSessionBus()
@@ -269,25 +268,45 @@ func main() {
 	}
 }
 
-func startScreenCaptureLoop(cache *ImageCache, broadcaster *SSEBroadcaster, interval time.Duration) {
+func startScreenCaptureLoop(cache *ImageCache, broadcaster *SSEBroadcaster, interval time.Duration, videoDir string) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		// Create temp file for screenshot
-		tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("snoopy-screenshot-%d.png", time.Now().UnixNano()))
-
-		// Capture screenshot using gnome-screenshot
-		cmd := exec.Command("gnome-screenshot", "-f", tmpFile)
-		if err := cmd.Run(); err != nil {
-			log.Printf("Failed to capture screenshot: %v", err)
+		// Find the most recent video file
+		videoFile, err := findMostRecentVideo(videoDir)
+		if err != nil {
+			log.Printf("Failed to find recent video: %v", err)
 			continue
 		}
 
-		// Read the screenshot file
-		pngData, err := os.ReadFile(tmpFile)
+		// Create temp file for frame extraction
+		tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("snoopy-frame-%d.jpg", time.Now().UnixNano()))
+
+		// Extract a frame from the video using ffmpeg
+		// Use -sseof to seek from the end, getting a recent frame
+		cmd := exec.Command("ffmpeg",
+			"-sseof", "-3", // Seek to 3 seconds before end of file
+			"-i", videoFile,
+			"-frames:v", "1", // Extract 1 frame
+			"-q:v", "2", // JPEG quality (2 is high quality)
+			"-y", // Overwrite output file
+			tmpFile,
+		)
+
+		// Capture stderr for error messages
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+
+		if err := cmd.Run(); err != nil {
+			log.Printf("Failed to extract frame from video: %v, stderr: %s", err, stderr.String())
+			continue
+		}
+
+		// Read the frame file
+		jpegData, err := os.ReadFile(tmpFile)
 		if err != nil {
-			log.Printf("Failed to read screenshot: %v", err)
+			log.Printf("Failed to read extracted frame: %v", err)
 			os.Remove(tmpFile)
 			continue
 		}
@@ -295,22 +314,8 @@ func startScreenCaptureLoop(cache *ImageCache, broadcaster *SSEBroadcaster, inte
 		// Remove temp file
 		os.Remove(tmpFile)
 
-		// Decode PNG
-		img, err := png.Decode(bytes.NewReader(pngData))
-		if err != nil {
-			log.Printf("Failed to decode PNG: %v", err)
-			continue
-		}
-
-		// Encode as JPEG
-		var jpegBuf bytes.Buffer
-		if err := jpeg.Encode(&jpegBuf, img, &jpeg.Options{Quality: 85}); err != nil {
-			log.Printf("Failed to encode JPEG: %v", err)
-			continue
-		}
-
 		// Add to cache
-		filename, err := cache.addImage(jpegBuf.Bytes())
+		filename, err := cache.addImage(jpegData)
 		if err != nil {
 			log.Printf("Failed to save screenshot: %v", err)
 			continue
@@ -321,6 +326,44 @@ func startScreenCaptureLoop(cache *ImageCache, broadcaster *SSEBroadcaster, inte
 		broadcaster.broadcast(imageURL)
 		log.Printf("Captured and broadcast image: %s", filename)
 	}
+}
+
+func findMostRecentVideo(dir string) (string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", err
+	}
+
+	var mostRecent string
+	var mostRecentTime time.Time
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		name := entry.Name()
+		// Look for .webm files (GNOME Shell default format)
+		if filepath.Ext(name) != ".webm" {
+			continue
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+
+		if info.ModTime().After(mostRecentTime) {
+			mostRecentTime = info.ModTime()
+			mostRecent = filepath.Join(dir, name)
+		}
+	}
+
+	if mostRecent == "" {
+		return "", fmt.Errorf("no video files found in %s", dir)
+	}
+
+	return mostRecent, nil
 }
 
 func startHTTPServer(addr string, port int, cache *ImageCache, broadcaster *SSEBroadcaster) {
