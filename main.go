@@ -10,11 +10,15 @@ import (
 	"image/draw"
 	"image/jpeg"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/godbus/dbus/v5"
@@ -30,6 +34,14 @@ const (
 	iface       = "org.gnome.Shell.Screencast"
 	startMethod = iface + ".Screencast"
 	stopMethod  = iface + ".StopScreencast"
+
+	// Avahi constants
+	avahiDest              = "org.freedesktop.Avahi"
+	avahiServerPath        = "/"
+	avahiServerIface       = "org.freedesktop.Avahi.Server"
+	avahiEntryGroupIface   = "org.freedesktop.Avahi.EntryGroup"
+	avahiIfaceUnspec int32 = -1
+	avahiProtoUnspec int32 = -1
 )
 
 // ImageCache manages the image cache directory and provides access to images
@@ -77,6 +89,150 @@ func (b *SSEBroadcaster) broadcast(msg string) {
 			// Skip slow clients
 		}
 	}
+}
+
+// AvahiService manages the Avahi mDNS service advertisement
+type AvahiService struct {
+	conn       *dbus.Conn
+	entryGroup dbus.ObjectPath
+	baseName   string
+	port       int
+}
+
+// newAvahiService creates and advertises a new Avahi service
+func newAvahiService(port int) (*AvahiService, error) {
+	// Connect to system bus
+	conn, err := dbus.ConnectSystemBus()
+	if err != nil {
+		return nil, fmt.Errorf("connect to system bus: %w", err)
+	}
+
+	// Get username for service name
+	username := os.Getenv("USER")
+	if username == "" {
+		username = "unknown"
+	}
+
+	baseName := fmt.Sprintf("Snoopy (%s)", username)
+
+	as := &AvahiService{
+		conn:     conn,
+		baseName: baseName,
+		port:     port,
+	}
+
+	// Create and advertise the service
+	if err := as.advertise(); err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	return as, nil
+}
+
+// advertise creates an EntryGroup and advertises the service
+func (as *AvahiService) advertise() error {
+	server := as.conn.Object(avahiDest, dbus.ObjectPath(avahiServerPath))
+
+	// Create EntryGroup
+	var entryGroupPath dbus.ObjectPath
+	err := server.Call(avahiServerIface+".EntryGroupNew", 0).Store(&entryGroupPath)
+	if err != nil {
+		return fmt.Errorf("create entry group: %w", err)
+	}
+	as.entryGroup = entryGroupPath
+
+	// Get local IP for collision suffix
+	ipSuffix := as.getIPSuffix()
+	serviceName := as.baseName
+	if ipSuffix != "" {
+		serviceName = fmt.Sprintf("%s [%s]", as.baseName, ipSuffix)
+	}
+
+	// Prepare TXT records
+	txtRecords := as.prepareTXTRecords()
+
+	// Add service to entry group
+	entryGroup := as.conn.Object(avahiDest, entryGroupPath)
+	err = entryGroup.Call(
+		avahiEntryGroupIface+".AddService",
+		0,
+		avahiIfaceUnspec, // interface (-1 = all)
+		avahiProtoUnspec, // protocol (-1 = all)
+		uint32(0),        // flags
+		serviceName,
+		"_snoopy._tcp",
+		"",              // domain (empty = default "local")
+		"",              // host (empty = default hostname)
+		uint16(as.port), // port
+		txtRecords,
+	).Err
+	if err != nil {
+		return fmt.Errorf("add service: %w", err)
+	}
+
+	// Commit the entry group
+	err = entryGroup.Call(avahiEntryGroupIface+".Commit", 0).Err
+	if err != nil {
+		return fmt.Errorf("commit entry group: %w", err)
+	}
+
+	log.Printf("Avahi: advertising service '%s' on port %d", serviceName, as.port)
+	return nil
+}
+
+// prepareTXTRecords creates TXT records for the service
+func (as *AvahiService) prepareTXTRecords() [][]byte {
+	records := []string{
+		"ver=1.0.0",
+		"proto=http",
+		"path=/",
+		"caps=stream,screencast",
+	}
+
+	txtRecords := make([][]byte, len(records))
+	for i, record := range records {
+		txtRecords[i] = []byte(record)
+	}
+	return txtRecords
+}
+
+// getIPSuffix returns the last octet of the local IP address
+func (as *AvahiService) getIPSuffix() string {
+	// Get all network interfaces
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		log.Printf("Avahi: failed to get network interfaces: %v", err)
+		return ""
+	}
+
+	// Find the first non-loopback IPv4 address
+	for _, addr := range addrs {
+		if ipNet, ok := addr.(*net.IPNet); ok && !ipNet.IP.IsLoopback() {
+			if ipNet.IP.To4() != nil {
+				// Get the IP address string
+				ip := ipNet.IP.String()
+				// Extract the last octet
+				parts := strings.Split(ip, ".")
+				if len(parts) == 4 {
+					return parts[3]
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
+// Close cleans up the Avahi service
+func (as *AvahiService) Close() error {
+	if as.entryGroup != "" {
+		entryGroup := as.conn.Object(avahiDest, as.entryGroup)
+		// Reset and free the entry group
+		entryGroup.Call(avahiEntryGroupIface+".Reset", 0)
+		entryGroup.Call(avahiEntryGroupIface+".Free", 0)
+	}
+	return as.conn.Close()
 }
 
 func newImageCache(dir string, maxImages int) (*ImageCache, error) {
@@ -220,6 +376,20 @@ func main() {
 		go startScreenCaptureLoop(imageCache, broadcaster, *imageInterval, *outDir)
 	}
 
+	// Start Avahi service advertisement
+	avahiService, err := newAvahiService(*port)
+	if err != nil {
+		log.Printf("Warning: Failed to start Avahi service: %v", err)
+		log.Printf("Service will not be advertised via mDNS/Bonjour")
+	} else {
+		defer avahiService.Close()
+		log.Printf("Avahi service started successfully")
+	}
+
+	// Setup signal handling for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
 	// Connect to the *session* bus (this must run in the logged-in user session).
 	conn, err := dbus.ConnectSessionBus()
 	if err != nil {
@@ -244,33 +414,43 @@ func main() {
 	log.Printf("Started initial recording")
 
 	for {
-		// Wait for the segment duration
-		time.Sleep(*segment)
-
-		// Start the next recording BEFORE stopping the current one
-		// This ensures continuous coverage with no gaps
-		call = obj.CallWithContext(ctx, startMethod, 0, fullTemplate, opts)
-		if call.Err != nil {
-			log.Printf("Start next screencast failed: %v", call.Err)
-			// If we can't start the next one, try to stop and restart cleanly
+		select {
+		case <-sigChan:
+			// Received shutdown signal
+			log.Printf("\nReceived shutdown signal, cleaning up...")
+			// Stop the screencast
 			obj.CallWithContext(ctx, stopMethod, 0)
-			time.Sleep(5 * time.Second)
-			continue
+			log.Printf("Shutdown complete")
+			return
+
+		case <-time.After(*segment):
+			// Wait for the segment duration
+
+			// Start the next recording BEFORE stopping the current one
+			// This ensures continuous coverage with no gaps
+			call = obj.CallWithContext(ctx, startMethod, 0, fullTemplate, opts)
+			if call.Err != nil {
+				log.Printf("Start next screencast failed: %v", call.Err)
+				// If we can't start the next one, try to stop and restart cleanly
+				obj.CallWithContext(ctx, stopMethod, 0)
+				time.Sleep(5 * time.Second)
+				continue
+			}
+
+			// Now stop the previous recording
+			// GNOME Shell may have already auto-stopped it when we started the new one
+			call = obj.CallWithContext(ctx, stopMethod, 0)
+			if call.Err != nil {
+				log.Printf("Stop previous screencast failed (may already be stopped): %v", call.Err)
+				// This is often okay - GNOME may auto-stop when starting a new one
+			}
+
+			// Brief pause to ensure clean transition
+			time.Sleep(*pause)
+
+			// Optional: print progress heartbeat
+			fmt.Print(".")
 		}
-
-		// Now stop the previous recording
-		// GNOME Shell may have already auto-stopped it when we started the new one
-		call = obj.CallWithContext(ctx, stopMethod, 0)
-		if call.Err != nil {
-			log.Printf("Stop previous screencast failed (may already be stopped): %v", call.Err)
-			// This is often okay - GNOME may auto-stop when starting a new one
-		}
-
-		// Brief pause to ensure clean transition
-		time.Sleep(*pause)
-
-		// Optional: print progress heartbeat
-		fmt.Print(".")
 	}
 }
 
