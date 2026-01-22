@@ -1,11 +1,11 @@
 [Unit]
-Description=GNOME Screencast loop (30-minute segments)
+Description=Snoopy - Continuous screen recording with web streaming
 After=graphical-session.target
 Wants=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/screencast-loop -segment 30m
+ExecStart=/usr/bin/snoopy -segment 30m -port 8900
 Restart=always
 RestartSec=2
 

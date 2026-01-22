@@ -1,0 +1,18 @@
+# Binary
+snoopy
+
+# Go build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go coverage files
+*.cover
+coverage.txt
+
+# Dependency directories
+vendor/
