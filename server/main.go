@@ -133,6 +133,30 @@ func newAvahiService(port int) (*AvahiService, error) {
 
 // advertise creates an EntryGroup and advertises the service
 func (as *AvahiService) advertise() error {
+	// Try to register with just the username first
+	err := as.tryAdvertise(as.baseName)
+	if err != nil {
+		// If registration failed, try with IP suffix
+		log.Printf("Avahi: failed to register with name '%s': %v", as.baseName, err)
+		ipSuffix := as.getIPSuffix()
+		if ipSuffix != "" {
+			nameWithSuffix := fmt.Sprintf("%s [%s]", as.baseName, ipSuffix)
+			log.Printf("Avahi: retrying with name '%s'", nameWithSuffix)
+			err = as.tryAdvertise(nameWithSuffix)
+			if err != nil {
+				return fmt.Errorf("failed to register with suffix: %w", err)
+			}
+		} else {
+			return fmt.Errorf("failed to register and no IP suffix available: %w", err)
+		}
+	}
+	
+	log.Printf("Avahi: advertising service '%s' on port %d", as.serviceName, as.port)
+	return nil
+}
+
+// tryAdvertise attempts to register the service with the given name
+func (as *AvahiService) tryAdvertise(name string) error {
 	server := as.conn.Object(avahiDest, dbus.ObjectPath(avahiServerPath))
 
 	// Create EntryGroup
@@ -143,9 +167,8 @@ func (as *AvahiService) advertise() error {
 	}
 	as.entryGroup = entryGroupPath
 
-	// Use base name as service name (no automatic IP suffix)
-	// Avahi will handle name conflicts automatically if needed
-	as.serviceName = as.baseName
+	// Set the service name
+	as.serviceName = name
 
 	// Prepare TXT records
 	txtRecords := as.prepareTXTRecords()
@@ -172,10 +195,11 @@ func (as *AvahiService) advertise() error {
 	// Commit the entry group
 	err = entryGroup.Call(avahiEntryGroupIface+".Commit", 0).Err
 	if err != nil {
+		// Reset the entry group before returning error
+		entryGroup.Call(avahiEntryGroupIface+".Reset", 0)
 		return fmt.Errorf("commit entry group: %w", err)
 	}
 
-	log.Printf("Avahi: advertising service '%s' on port %d", as.serviceName, as.port)
 	return nil
 }
 
