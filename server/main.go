@@ -143,13 +143,9 @@ func (as *AvahiService) advertise() error {
 	}
 	as.entryGroup = entryGroupPath
 
-	// Get local IP for collision suffix
-	ipSuffix := as.getIPSuffix()
-	serviceName := as.baseName
-	if ipSuffix != "" {
-		serviceName = fmt.Sprintf("%s [%s]", as.baseName, ipSuffix)
-	}
-	as.serviceName = serviceName
+	// Use base name as service name (no automatic IP suffix)
+	// Avahi will handle name conflicts automatically if needed
+	as.serviceName = as.baseName
 
 	// Prepare TXT records
 	txtRecords := as.prepareTXTRecords()
@@ -162,7 +158,7 @@ func (as *AvahiService) advertise() error {
 		avahiIfaceUnspec, // interface (-1 = all)
 		avahiProtoUnspec, // protocol (-1 = all)
 		uint32(0),        // flags
-		serviceName,
+		as.serviceName,
 		"_snoopy._tcp",
 		"",              // domain (empty = default "local")
 		"",              // host (empty = default hostname)
@@ -179,7 +175,7 @@ func (as *AvahiService) advertise() error {
 		return fmt.Errorf("commit entry group: %w", err)
 	}
 
-	log.Printf("Avahi: advertising service '%s' on port %d", serviceName, as.port)
+	log.Printf("Avahi: advertising service '%s' on port %d", as.serviceName, as.port)
 	return nil
 }
 
