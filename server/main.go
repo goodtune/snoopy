@@ -573,6 +573,25 @@ func findMostRecentVideo(dir string) (string, error) {
 	return mostRecent, nil
 }
 
+// corsMiddleware adds CORS headers to allow web clients to access the API
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Allow requests from any origin
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Cache-Control")
+		w.Header().Set("Access-Control-Max-Age", "3600")
+
+		// Handle preflight requests
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
 func startHTTPServer(addr string, port int, cache *ImageCache, broadcaster *SSEBroadcaster, serviceName string) {
 	mux := http.NewServeMux()
 
@@ -595,10 +614,13 @@ func startHTTPServer(addr string, port int, cache *ImageCache, broadcaster *SSEB
 		serveImage(w, r, cache)
 	})
 
+	// Wrap with CORS middleware
+	handler := corsMiddleware(mux)
+
 	listenAddr := fmt.Sprintf("%s:%d", addr, port)
 	log.Printf("Starting HTTP server on %s", listenAddr)
 
-	if err := http.ListenAndServe(listenAddr, mux); err != nil {
+	if err := http.ListenAndServe(listenAddr, handler); err != nil {
 		log.Fatalf("HTTP server failed: %v", err)
 	}
 }
@@ -708,7 +730,6 @@ func serveSSE(w http.ResponseWriter, r *http.Request, cache *ImageCache, broadca
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	// Create client channel
 	clientChan := make(chan string, 10)
