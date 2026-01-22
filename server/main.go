@@ -114,7 +114,7 @@ func newAvahiService(port int) (*AvahiService, error) {
 		username = "unknown"
 	}
 
-	baseName := fmt.Sprintf("Snoopy (%s)", username)
+	baseName := username
 
 	as := &AvahiService{
 		conn:     conn,
@@ -133,6 +133,32 @@ func newAvahiService(port int) (*AvahiService, error) {
 
 // advertise creates an EntryGroup and advertises the service
 func (as *AvahiService) advertise() error {
+	// Try to register with just the username first
+	err := as.tryAdvertise(as.baseName)
+	if err != nil {
+		// If registration failed, try with IP suffix
+		// Note: We retry on any error since Avahi doesn't provide specific collision error codes
+		// through D-Bus. This is a reasonable fallback for most error scenarios.
+		log.Printf("Avahi: failed to register with name '%s': %v", as.baseName, err)
+		ipSuffix := as.getIPSuffix()
+		if ipSuffix != "" {
+			nameWithSuffix := fmt.Sprintf("%s [%s]", as.baseName, ipSuffix)
+			log.Printf("Avahi: retrying with name '%s'", nameWithSuffix)
+			err = as.tryAdvertise(nameWithSuffix)
+			if err != nil {
+				return fmt.Errorf("failed to register with suffix: %w", err)
+			}
+		} else {
+			return fmt.Errorf("failed to register and no IP suffix available: %w", err)
+		}
+	}
+	
+	log.Printf("Avahi: advertising service '%s' on port %d", as.serviceName, as.port)
+	return nil
+}
+
+// tryAdvertise attempts to register the service with the given name
+func (as *AvahiService) tryAdvertise(name string) error {
 	server := as.conn.Object(avahiDest, dbus.ObjectPath(avahiServerPath))
 
 	// Create EntryGroup
@@ -143,13 +169,8 @@ func (as *AvahiService) advertise() error {
 	}
 	as.entryGroup = entryGroupPath
 
-	// Get local IP for collision suffix
-	ipSuffix := as.getIPSuffix()
-	serviceName := as.baseName
-	if ipSuffix != "" {
-		serviceName = fmt.Sprintf("%s [%s]", as.baseName, ipSuffix)
-	}
-	as.serviceName = serviceName
+	// Set the service name
+	as.serviceName = name
 
 	// Prepare TXT records
 	txtRecords := as.prepareTXTRecords()
@@ -162,7 +183,7 @@ func (as *AvahiService) advertise() error {
 		avahiIfaceUnspec, // interface (-1 = all)
 		avahiProtoUnspec, // protocol (-1 = all)
 		uint32(0),        // flags
-		serviceName,
+		as.serviceName,
 		"_snoopy._tcp",
 		"",              // domain (empty = default "local")
 		"",              // host (empty = default hostname)
@@ -176,10 +197,13 @@ func (as *AvahiService) advertise() error {
 	// Commit the entry group
 	err = entryGroup.Call(avahiEntryGroupIface+".Commit", 0).Err
 	if err != nil {
+		// Reset the entry group before returning error
+		if resetErr := entryGroup.Call(avahiEntryGroupIface+".Reset", 0).Err; resetErr != nil {
+			log.Printf("Avahi: warning - failed to reset entry group: %v", resetErr)
+		}
 		return fmt.Errorf("commit entry group: %w", err)
 	}
 
-	log.Printf("Avahi: advertising service '%s' on port %d", serviceName, as.port)
 	return nil
 }
 
@@ -377,7 +401,7 @@ func main() {
 	if username == "" {
 		username = "unknown"
 	}
-	serviceName := fmt.Sprintf("Snoopy (%s)", username)
+	serviceName := username
 
 	// Start HTTP server
 	go startHTTPServer(*addr, *port, imageCache, broadcaster, serviceName)
