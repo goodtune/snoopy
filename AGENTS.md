@@ -5,7 +5,8 @@
 ### Core Functionality
 - **Automated Screencast Recording**: Continuously records your screen in segments by interfacing with GNOME Shell's screencast D-Bus API
 - **Segmented Recording**: Records in configurable time segments (default: 30 minutes) to avoid creating overly large video files
-- **Automatic Loop**: After each segment completes, it pauses briefly (default: 1 second), then starts a new recording automatically
+- **Overlapping Recording**: Starts the next recording **before** stopping the current one to eliminate gaps and ensure complete coverage
+- **Seamless Transitions**: The brief pause (default: 1 second) between segments is only for cleanup, not recording - ensuring no data loss
 
 ### Key Features
 1. **Configurable Options** (via command-line flags):

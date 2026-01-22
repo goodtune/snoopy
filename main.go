@@ -13,9 +13,9 @@ import (
 )
 
 const (
-	dest       = "org.gnome.Shell.Screencast"
-	objPath    = "/org/gnome/Shell/Screencast"
-	iface      = "org.gnome.Shell.Screencast"
+	dest        = "org.gnome.Shell.Screencast"
+	objPath     = "/org/gnome/Shell/Screencast"
+	iface       = "org.gnome.Shell.Screencast"
 	startMethod = iface + ".Screencast"
 	stopMethod  = iface + ".StopScreencast"
 )
@@ -54,33 +54,41 @@ func main() {
 
 	log.Printf("Starting screencast loop: out=%s segment=%s", *outDir, segment.String())
 
-	for {
-		// GNOME Shell expects an "options" dictionary; {} is acceptable.
-		// Use map[string]dbus.Variant{} as an empty a{sv}.
-		opts := map[string]dbus.Variant{}
+	// Start the first recording
+	opts := map[string]dbus.Variant{}
+	call := obj.CallWithContext(ctx, startMethod, 0, fullTemplate, opts)
+	if call.Err != nil {
+		log.Fatalf("Failed to start initial screencast: %v", call.Err)
+	}
+	log.Printf("Started initial recording")
 
-		call := obj.CallWithContext(ctx, startMethod, 0, fullTemplate, opts)
+	for {
+		// Wait for the segment duration
+		time.Sleep(*segment)
+
+		// Start the next recording BEFORE stopping the current one
+		// This ensures continuous coverage with no gaps
+		call = obj.CallWithContext(ctx, startMethod, 0, fullTemplate, opts)
 		if call.Err != nil {
-			log.Printf("Start screencast failed: %v", call.Err)
+			log.Printf("Start next screencast failed: %v", call.Err)
+			// If we can't start the next one, try to stop and restart cleanly
+			obj.CallWithContext(ctx, stopMethod, 0)
 			time.Sleep(5 * time.Second)
 			continue
 		}
 
-		// The Screencast method returns values; we don’t strictly need them for looping.
-		// If you want them, you can decode into variables with call.Store(&a, &b...).
-
-		time.Sleep(*segment)
-
+		// Now stop the previous recording
+		// GNOME Shell may have already auto-stopped it when we started the new one
 		call = obj.CallWithContext(ctx, stopMethod, 0)
 		if call.Err != nil {
-			log.Printf("Stop screencast failed: %v", call.Err)
-			// continue anyway; next loop start will typically reset state
+			log.Printf("Stop previous screencast failed (may already be stopped): %v", call.Err)
+			// This is often okay - GNOME may auto-stop when starting a new one
 		}
 
+		// Brief pause to ensure clean transition
 		time.Sleep(*pause)
 
 		// Optional: print progress heartbeat
 		fmt.Print(".")
 	}
 }
-
