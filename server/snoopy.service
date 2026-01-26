@@ -6,7 +6,9 @@ Wants=graphical-session.target
 [Service]
 Type=simple
 ExecStart=/usr/bin/snoopy -segment 30m -port 8900
-Restart=always
+# Restart on failure (non-zero exit code) such as when DBus connection is lost
+# This allows the service to recover from session pause/lock events
+Restart=on-failure
 RestartSec=2
 
 [Install]

@@ -362,16 +362,30 @@ func (ic *ImageCache) getImagePath(filename string) string {
 	return filepath.Join(ic.dir, filename)
 }
 
+// checkDBusConnection verifies that the DBus connection is still alive
+// by calling the Ping method on the Peer interface
+func checkDBusConnection(conn *dbus.Conn) error {
+	// Use the Peer.Ping method which is available on all DBus connections
+	// This is a standard DBus interface for checking connection health
+	obj := conn.BusObject()
+	call := obj.Call("org.freedesktop.DBus.Peer.Ping", 0)
+	if call.Err != nil {
+		return fmt.Errorf("DBus connection lost: %w", call.Err)
+	}
+	return nil
+}
+
 func main() {
 	var (
-		outDir         = flag.String("out", "", "Output directory (default: ~/.cache/snoopy/video)")
-		segment        = flag.Duration("segment", 30*time.Minute, "Segment duration")
-		pause          = flag.Duration("pause", 1*time.Second, "Pause between segments")
-		template       = flag.String("template", "screen-%d-%t.webm", "Filename template used by GNOME Shell")
-		addr           = flag.String("addr", "0.0.0.0", "HTTP server bind address")
-		port           = flag.Int("port", 8900, "HTTP server port")
-		imageInterval  = flag.Duration("image-interval", 5*time.Second, "Interval between screen captures for web streaming")
-		imageCacheSize = flag.Int("image-cache-size", 100, "Maximum number of images to keep in cache")
+		outDir           = flag.String("out", "", "Output directory (default: ~/.cache/snoopy/video)")
+		segment          = flag.Duration("segment", 30*time.Minute, "Segment duration")
+		pause            = flag.Duration("pause", 1*time.Second, "Pause between segments")
+		template         = flag.String("template", "screen-%d-%t.webm", "Filename template used by GNOME Shell")
+		addr             = flag.String("addr", "0.0.0.0", "HTTP server bind address")
+		port             = flag.Int("port", 8900, "HTTP server port")
+		imageInterval    = flag.Duration("image-interval", 5*time.Second, "Interval between screen captures for web streaming")
+		imageCacheSize   = flag.Int("image-cache-size", 100, "Maximum number of images to keep in cache")
+		healthCheckInterval = flag.Duration("health-check", 15*time.Second, "Interval for DBus connection health checks")
 	)
 	flag.Parse()
 
@@ -444,6 +458,7 @@ func main() {
 
 	log.Printf("Starting screencast loop: out=%s segment=%s", *outDir, segment.String())
 	log.Printf("HTTP server running on http://%s:%d", *addr, *port)
+	log.Printf("DBus health check enabled: interval=%s", healthCheckInterval.String())
 
 	// Start the first recording
 	opts := map[string]dbus.Variant{}
@@ -452,6 +467,10 @@ func main() {
 		log.Fatalf("Failed to start initial screencast: %v", call.Err)
 	}
 	log.Printf("Started initial recording")
+
+	// Create ticker for health checks
+	healthCheckTicker := time.NewTicker(*healthCheckInterval)
+	defer healthCheckTicker.Stop()
 
 	for {
 		select {
@@ -463,6 +482,17 @@ func main() {
 			log.Printf("Shutdown complete")
 			return
 
+		case <-healthCheckTicker.C:
+			// Periodic health check for DBus connection
+			if err := checkDBusConnection(conn); err != nil {
+				log.Printf("ERROR: %v", err)
+				log.Printf("DBus session connection lost (likely due to session pause/lock)")
+				log.Printf("Exiting with error code 1 for systemd restart")
+				// Stop the screencast before exiting
+				obj.CallWithContext(ctx, stopMethod, 0)
+				os.Exit(1)
+			}
+
 		case <-time.After(*segment):
 			// Wait for the segment duration
 
@@ -471,6 +501,12 @@ func main() {
 			call = obj.CallWithContext(ctx, startMethod, 0, fullTemplate, opts)
 			if call.Err != nil {
 				log.Printf("Start next screencast failed: %v", call.Err)
+				// Check if this is due to connection loss
+				if err := checkDBusConnection(conn); err != nil {
+					log.Printf("ERROR: DBus connection lost during segment rotation: %v", err)
+					log.Printf("Exiting with error code 1 for systemd restart")
+					os.Exit(1)
+				}
 				// If we can't start the next one, try to stop and restart cleanly
 				obj.CallWithContext(ctx, stopMethod, 0)
 				time.Sleep(5 * time.Second)
