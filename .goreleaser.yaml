@@ -3,6 +3,7 @@ version: 2
 # Main build configuration
 builds:
   - id: snoopy
+    dir: server
     main: .
     binary: snoopy
     env:
@@ -30,7 +31,7 @@ archives:
     files:
       - AGENTS.md
       - assets/snoopy-500.jpg
-      - snoopy.service
+      - server/snoopy.service
 
 # Linux packages (RPM only)
 nfpms:
@@ -63,7 +64,7 @@ nfpms:
       # Binary (already included by default in bindir)
 
       # Systemd service file
-      - src: snoopy.service
+      - src: server/snoopy.service
         dst: /usr/lib/systemd/user/snoopy.service
         file_info:
           mode: 0644
