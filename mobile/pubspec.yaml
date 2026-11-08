@@ -38,8 +38,8 @@ dependencies:
   # HTTP client for making HTTP requests
   http: ^1.6.0
 
-  # SSE (Server-Sent Events) client for streaming images
-  flutter_client_sse: ^2.0.3
+  # SSE (Server-Sent Events) client with reconnect/backoff
+  eventflux: ^3.0.2
 
   # mDNS/Bonjour service discovery
   nsd: ^5.0.1

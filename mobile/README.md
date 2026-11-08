@@ -9,7 +9,10 @@ preview of each one, and opens a full-screen viewer that follows the server's
   advertises this type with TXT records `path=/` and `sse=/sse/image`. Servers
   can also be added by host and port.
 - **Viewer**: swipe between recent captures, pinch to zoom, tap to toggle
-  controls, and save the current capture to the photo gallery.
+  controls, and save the current capture to the photo gallery. The feed
+  uses [`eventflux`](https://pub.dev/packages/eventflux) and reconnects on
+  its own when the stream drops (exponential backoff from 1s to 30s, with
+  jitter); leaving the viewer closes the connection and stops retrying.
 - **Cache**: received images are kept in the app's documents directory and
   can be browsed and deleted from the *Cached images* screen.
 

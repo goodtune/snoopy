@@ -43,13 +43,20 @@ class FakeImageFeed implements ImageFeed {
   final SnoopyService service;
   final StreamController<CachedImage> _controller =
       StreamController<CachedImage>.broadcast();
+  int connectCount = 0;
+  bool disposed = false;
+
+  bool get hasListener => _controller.hasListener;
 
   @override
   Stream<CachedImage> get imageStream => _controller.stream;
 
   @override
-  Future<void> connect() async {}
+  Future<void> connect() async => connectCount++;
 
   @override
-  Future<void> dispose() => _controller.close();
+  Future<void> dispose() {
+    disposed = true;
+    return _controller.close();
+  }
 }
