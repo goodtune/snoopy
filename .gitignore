@@ -1,5 +1,8 @@
 # Binary
-snoopy
+/server/snoopy
+
+# GoReleaser output
+dist/
 
 # Go build artifacts
 *.exe
