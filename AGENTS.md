@@ -13,10 +13,11 @@ duplicate README content here.
 
 | Path | What lives there |
 | --- | --- |
-| `server/` | Go module root (`go.mod`, `main.go`, tests, `.golangci.yml`, `snoopy.service`) |
-| `server/main.go` | Flags (top of `realMain`), screencast/D-Bus loop, Avahi advertisement (`txtRecords`), ffmpeg frame extraction, image cache, HTTP handlers (`newHTTPHandler`) |
-| `server/snoopy.service` | systemd **user** unit, installed to `/usr/lib/systemd/user/` |
-| `scripts/` | nfpm post-install / pre-remove scripts |
+| `server/` | Go module root (`go.mod`, `main.go`, tests, `.golangci.yml`, `snoopy.service`, `snoopy.conf.example`) |
+| `server/main.go` | Flags and their `SNOOPY_*` env defaults (top of `realMain`, `envDefaults`), screencast/D-Bus loop, Avahi advertisement (`txtRecords`), ffmpeg frame extraction, image cache, HTTP handlers (`newHTTPHandler`) |
+| `server/snoopy.service` | systemd **user** unit, installed to `/usr/lib/systemd/user/`; reads optional `EnvironmentFile`s `/etc/snoopy/snoopy.conf` and `%h/.config/snoopy/snoopy.conf` |
+| `server/snoopy.conf.example` | Commented `SNOOPY_*` settings; packaged to `/usr/share/doc/snoopy/` and at the tarball root |
+| `scripts/` | nfpm post-install (prints how to enable; never enables) / pre-remove (global disable on erase) scripts |
 | `.goreleaser.yaml` | Release build (`dir: server`): tar.gz, rpm, deb, changelog groups |
 | `mobile/` | Flutter app; platforms: android, ios, macos. Code in `mobile/lib/{models,screens,services,widgets}` |
 | `assets/`, `mobile/assets/` | Images, stored in Git LFS (CI checkouts use `lfs: true`) |
@@ -59,9 +60,9 @@ CI mirrors these commands; keep them passing locally before pushing.
   `feat:` (Features), `fix:` (Bug Fixes), `sec:` (Security Updates), `perf:`
   (Performance Improvements); everything else lands in Others. `docs:`,
   `test:`, `ci:` and `chore:` commits are excluded from release notes.
-- **Docs follow code.** When you add or change a flag, endpoint, mDNS TXT
-  record, file location or package contents, update `README.md` in the same
-  change (flag table, API table, install steps).
+- **Docs follow code.** When you add or change a flag, env var, endpoint,
+  mDNS TXT record, file location or package contents, update `README.md` in
+  the same change (configuration table, API table, install steps).
 - **Segment rotation** (`recordLoop`/`rotate` in `server/main.go`): GNOME
   Shell refuses a second screencast from the same D-Bus client, so the server
   holds two session-bus connections and starts the next segment on the idle
@@ -71,12 +72,27 @@ CI mirrors these commands; keep them passing locally before pushing.
   rather than requiring a live GNOME session.
 - **Exit codes**: `realMain` returns 0 on SIGINT/SIGTERM, 1 on errors
   (including D-Bus loss, after stopping the screencast and withdrawing the
-  Avahi record via deferred cleanup) and 2 on invalid flags. Do not call
+  Avahi record via deferred cleanup) and 2 on invalid flags or `SNOOPY_*`
+  values. Do not call
   `os.Exit` or `log.Fatal` inside `run`; it would skip the cleanup.
   `Restart=on-failure` in the user unit relies on the status-1 exit.
 - **systemd unit**: `WantedBy=graphical-session.target` with `PartOf=` and
   `After=` on the same target, so it only runs in graphical sessions. Do not
   switch back to `default.target` (SSH/TTY logins would restart-loop).
+  `ExecStart=/usr/bin/snoopy` takes no arguments; configuration comes from
+  the `EnvironmentFile=` lines.
+- **No auto-enable**: package scripts must not enable the unit (enabling
+  screen recording is the administrator's choice). `postinstall.sh` only
+  prints instructions; `preremove.sh` still runs `systemctl --global disable`
+  on real removal (guarded by `$1` and `|| true`).
+- **Env fallbacks**: every flag's default comes from `SNOOPY_<FLAG>` (flag
+  name upper-cased, `-` to `_`) via `envDefaults`, so `-help` shows the
+  effective default. Precedence: flag > env > built-in. Invalid env values
+  exit 2. A new flag needs its env default, a line in
+  `server/snoopy.conf.example` and a row in the README configuration table.
+- **Loopback by default**: `-addr` defaults to `127.0.0.1`. `shouldAdvertise`
+  skips the Avahi advertisement for loopback binds (`127.0.0.0/8`, `::1`,
+  `localhost`); exposing on the LAN is `SNOOPY_ADDR=0.0.0.0` in a conf file.
 - **Version**: injected at link time (`-X main.version=...`, plus `commit`
   and `date`); `snoopy -version` prints it and the same value is advertised
   in the mDNS TXT record `ver=`. Clients must treat `ver` as informational

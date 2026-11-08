@@ -1,0 +1,26 @@
+# Snoopy configuration, read by the systemd user unit (snoopy.service) from
+#   /etc/snoopy/snoopy.conf            (all users)
+#   ~/.config/snoopy/snoopy.conf       (your user; overrides the above)
+# Each SNOOPY_* variable sets the default of the matching command-line flag;
+# a flag given on the command line still wins. Values shown are the built-in
+# defaults. Uncomment and edit, then: systemctl --user restart snoopy.service
+
+# WARNING: Snoopy has no authentication. 0.0.0.0 serves live screenshots to
+# anyone who can reach the port and advertises the server over mDNS. Only do
+# this on a trusted LAN (it is required for the mobile app to find the server).
+# SNOOPY_ADDR=0.0.0.0
+
+# HTTP bind address (loopback: not reachable from other machines, no mDNS).
+#SNOOPY_ADDR=127.0.0.1
+#SNOOPY_PORT=8900
+
+# Recording. An empty SNOOPY_OUT means ~/.cache/snoopy/video.
+#SNOOPY_OUT=
+#SNOOPY_SEGMENT=30m
+#SNOOPY_PAUSE=1s
+#SNOOPY_TEMPLATE=screen-%d-%t.webm
+#SNOOPY_HEALTH_CHECK=15s
+
+# Live frames for the web page and mobile app.
+#SNOOPY_IMAGE_INTERVAL=5s
+#SNOOPY_IMAGE_CACHE_SIZE=100

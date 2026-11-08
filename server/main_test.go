@@ -492,3 +492,91 @@ func TestBuildVersion(t *testing.T) {
 		t.Error("buildVersion() returned empty string")
 	}
 }
+
+func TestEnvName(t *testing.T) {
+	for name, want := range map[string]string{
+		"addr":             "SNOOPY_ADDR",
+		"health-check":     "SNOOPY_HEALTH_CHECK",
+		"image-cache-size": "SNOOPY_IMAGE_CACHE_SIZE",
+	} {
+		if got := envName(name); got != want {
+			t.Errorf("envName(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
+
+func TestEnvDefaults(t *testing.T) {
+	vars := map[string]string{
+		"SNOOPY_ADDR":             "0.0.0.0",
+		"SNOOPY_PORT":             " 9000 ",
+		"SNOOPY_SEGMENT":          "5m",
+		"SNOOPY_TEMPLATE":         "", // empty counts as unset
+		"SNOOPY_IMAGE_INTERVAL":   "soon",
+		"SNOOPY_IMAGE_CACHE_SIZE": "lots",
+	}
+	lookup := func(k string) (string, bool) { v, ok := vars[k]; return v, ok }
+
+	t.Run("valid and unset", func(t *testing.T) {
+		env := newEnvDefaults(lookup)
+		if got := env.string("addr", "127.0.0.1"); got != "0.0.0.0" {
+			t.Errorf("addr = %q, want 0.0.0.0", got)
+		}
+		if got := env.string("template", "screen-%d-%t.webm"); got != "screen-%d-%t.webm" {
+			t.Errorf("template = %q, want built-in default", got)
+		}
+		if got := env.string("out", ""); got != "" {
+			t.Errorf("out = %q, want empty", got)
+		}
+		if got := env.int("port", 8900); got != 9000 {
+			t.Errorf("port = %d, want 9000", got)
+		}
+		if got := env.duration("segment", 30*time.Minute); got != 5*time.Minute {
+			t.Errorf("segment = %s, want 5m", got)
+		}
+		if got := env.duration("pause", time.Second); got != time.Second {
+			t.Errorf("pause = %s, want 1s", got)
+		}
+		if err := env.err(); err != nil {
+			t.Errorf("err() = %v, want nil", err)
+		}
+	})
+
+	t.Run("invalid", func(t *testing.T) {
+		env := newEnvDefaults(lookup)
+		if got := env.duration("image-interval", 5*time.Second); got != 5*time.Second {
+			t.Errorf("image-interval = %s, want fallback 5s", got)
+		}
+		if got := env.int("image-cache-size", 100); got != 100 {
+			t.Errorf("image-cache-size = %d, want fallback 100", got)
+		}
+		err := env.err()
+		if err == nil {
+			t.Fatal("err() = nil, want parse errors")
+		}
+		for _, want := range []string{`SNOOPY_IMAGE_INTERVAL="soon"`, `SNOOPY_IMAGE_CACHE_SIZE="lots"`} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("err() = %q, want it to mention %s", err, want)
+			}
+		}
+	})
+}
+
+func TestShouldAdvertise(t *testing.T) {
+	for addr, want := range map[string]bool{
+		"127.0.0.1":    false,
+		"127.0.1.1":    false,
+		"::1":          false,
+		"[::1]":        false,
+		"localhost":    false,
+		"LocalHost":    false,
+		"0.0.0.0":      true,
+		"::":           true,
+		"":             true,
+		"192.168.1.10": true,
+		"myhost.lan":   true,
+	} {
+		if got := shouldAdvertise(addr); got != want {
+			t.Errorf("shouldAdvertise(%q) = %v, want %v", addr, got, want)
+		}
+	}
+}

@@ -42,6 +42,8 @@ archives:
       - README.md
       - src: server/snoopy.service
         strip_parent: true
+      - src: server/snoopy.conf.example
+        strip_parent: true
       - assets/snoopy-500.jpg
 
 # Linux packages (RPM and Debian)
@@ -54,7 +56,7 @@ nfpms:
     file_name_template: "{{ .ConventionalFileName }}"
     vendor: GoodTune
     homepage: https://github.com/goodtune/snoopy
-    maintainer: GoodTune <snoopy@goodtune.io>
+    maintainer: Gary Reynolds <gary@touch.asn.au>
     description: |
       Snoopy - Continuous screen recording and web-based streaming for GNOME-based Linux systems.
       Provides automated screencast recording in segments by interfacing with GNOME Shell's
@@ -79,6 +81,13 @@ nfpms:
       # Branding asset
       - src: assets/snoopy-500.jpg
         dst: /usr/share/snoopy/assets/snoopy-500.jpg
+        file_info:
+          mode: 0644
+
+      # Example configuration (copy to /etc/snoopy/snoopy.conf or
+      # ~/.config/snoopy/snoopy.conf)
+      - src: server/snoopy.conf.example
+        dst: /usr/share/doc/snoopy/snoopy.conf.example
         file_info:
           mode: 0644
 
@@ -165,16 +174,16 @@ release:
     #### Linux (RPM-based: RHEL/CentOS/Fedora)
     ```bash
     sudo dnf install https://github.com/goodtune/snoopy/releases/download/{{ .Tag }}/snoopy-{{ .Version }}-1.x86_64.rpm
-    # The service is enabled for all users; start it in your current session
-    systemctl --user start snoopy.service
+    # Not enabled automatically; enable it for your user (or see the README)
+    systemctl --user enable --now snoopy.service
     ```
 
     #### Linux (Debian/Ubuntu)
     ```bash
     wget https://github.com/goodtune/snoopy/releases/download/{{ .Tag }}/snoopy_{{ .Version }}_amd64.deb
     sudo apt install ./snoopy_{{ .Version }}_amd64.deb
-    # The service is enabled for all users; start it in your current session
-    systemctl --user start snoopy.service
+    # Not enabled automatically; enable it for your user (or see the README)
+    systemctl --user enable --now snoopy.service
     ```
 
     #### Binary Installation

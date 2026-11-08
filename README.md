@@ -22,13 +22,16 @@ capturing long-running screen activity without manual effort.
 ## Security
 
 > [!WARNING]
-> **Security: Snoopy has no authentication.** By default the server binds
-> `0.0.0.0:8900`, serves live screenshots to anyone who can reach that port,
-> sends permissive CORS headers (`Access-Control-Allow-Origin: *`) and
-> announces itself over mDNS. Run it only on a trusted LAN. Otherwise bind it
-> to loopback with `-addr 127.0.0.1` (and use an SSH tunnel or a reverse proxy
-> with authentication), or firewall port 8900. Recordings and snapshots on
-> disk are as sensitive as your screen.
+> **Security: Snoopy has no authentication.** By default it binds
+> `127.0.0.1:8900` (this machine only) and is not announced over mDNS, so the
+> mobile app cannot find it. Once
+> [exposed on the LAN](#expose-on-the-lan) (`SNOOPY_ADDR=0.0.0.0`, required
+> for the app's mDNS discovery) it serves
+> live screenshots to anyone who can reach port 8900, sends permissive CORS
+> headers (`Access-Control-Allow-Origin: *`) and announces itself over mDNS:
+> do that only on a trusted LAN, or keep loopback and use an SSH tunnel or an
+> authenticating reverse proxy. Recordings on disk are as sensitive as your
+> screen.
 
 ## Requirements
 
@@ -37,8 +40,8 @@ capturing long-running screen activity without manual effort.
 - Linux with a GNOME Shell session (Wayland or X11) that exposes
   `org.gnome.Shell.Screencast` on the session bus.
 - systemd (the server runs as a systemd **user** service).
-- Avahi daemon, for mDNS advertisement (optional: without it the server still
-  works, but the mobile app cannot discover it).
+- Avahi daemon, optional: advertises the server over mDNS once it is
+  [exposed on the LAN](#expose-on-the-lan), so the mobile app can find it.
 - `ffmpeg`, optional: needed to extract live frames. Without it recording
   still works and the web page shows a static "waiting" image.
   Install with `sudo dnf install ffmpeg` or `sudo apt install ffmpeg`.
@@ -64,16 +67,17 @@ wget https://github.com/goodtune/snoopy/releases/download/v0.1.0/snoopy_0.1.0_am
 sudo apt install ./snoopy_0.1.0_amd64.deb
 ```
 
-The packages install `/usr/bin/snoopy` and the user unit
-`/usr/lib/systemd/user/snoopy.service`, recommend `ffmpeg`, and enable the unit
-for all users. The unit is `WantedBy=graphical-session.target` and
-`PartOf=graphical-session.target`, so it starts with your GNOME session and
-stops with it (it does not start on SSH or TTY logins). To start it in your
-current desktop session without logging out (as your user, not root):
+The packages install `/usr/bin/snoopy`, the user unit
+`/usr/lib/systemd/user/snoopy.service` and
+`/usr/share/doc/snoopy/snoopy.conf.example`, and recommend `ffmpeg`. They do
+**not** enable the service; that is the administrator's or user's choice. The
+unit is `WantedBy=` and `PartOf=graphical-session.target`, so once enabled it
+starts and stops with your GNOME session (not on SSH or TTY logins).
 
 ```bash
-systemctl --user enable --now snoopy.service
-journalctl --user -u snoopy.service -f   # logs
+systemctl --user enable --now snoopy.service   # your user, now (not as root)
+sudo systemctl --global enable snoopy.service  # or every user, at next login
+journalctl --user -u snoopy.service -f         # logs
 ```
 
 **Tarball** (any distribution):
@@ -83,11 +87,27 @@ wget https://github.com/goodtune/snoopy/releases/download/v0.1.0/snoopy_0.1.0_Li
 tar -xzf snoopy_0.1.0_Linux_x86_64.tar.gz
 sudo install -m 0755 snoopy /usr/bin/snoopy
 sudo install -m 0644 snoopy.service /usr/lib/systemd/user/snoopy.service
+sudo install -Dm 0644 snoopy.conf.example /usr/share/doc/snoopy/snoopy.conf.example
 systemctl --user daemon-reload
 systemctl --user enable --now snoopy.service
+snoopy -version
 ```
 
-Check the installed version with `snoopy -version`.
+### Expose on the LAN
+
+By default the server listens on `127.0.0.1` only: other machines and the
+mobile app cannot reach it, and it is not advertised over mDNS. To expose it
+on the LAN (read [Security](#security) first), for your user:
+
+```bash
+mkdir -p ~/.config/snoopy
+echo 'SNOOPY_ADDR=0.0.0.0' >> ~/.config/snoopy/snoopy.conf
+systemctl --user restart snoopy.service
+```
+
+For every user on the machine, put the same line in `/etc/snoopy/snoopy.conf`
+(`sudo mkdir -p /etc/snoopy && echo 'SNOOPY_ADDR=0.0.0.0' | sudo tee -a
+/etc/snoopy/snoopy.conf`); it applies from each user's next service start.
 
 ### How recording works
 
@@ -102,14 +122,10 @@ connection, which leaves a gap of roughly `-pause`.
 
 ### Exit status and restarts
 
-| Exit status | Meaning |
-| --- | --- |
-| `0` | Stopped by SIGINT/SIGTERM (e.g. `systemctl --user stop`) |
-| `1` | Error, including loss of the D-Bus session connection |
-| `2` | Invalid command-line flags |
-
-The server always stops the active screencast and withdraws its mDNS record
-before exiting. When the session is locked or suspended the D-Bus connection
+Exit status is `0` when stopped by SIGINT/SIGTERM (e.g. `systemctl --user
+stop`), `1` on errors including loss of the D-Bus session connection, and `2`
+on invalid flags or `SNOOPY_*` values. The server always stops the active
+screencast and withdraws its mDNS record before exiting. When the session is locked or suspended the D-Bus connection
 to GNOME Shell can drop; a periodic health check
 (`org.freedesktop.DBus.Peer.Ping`) notices, the server exits with status 1,
 and `Restart=on-failure` starts a fresh instance (up to 10 restarts in 5
@@ -117,28 +133,34 @@ minutes) once the session is back.
 
 ## Configuration
 
-Flags are passed on the command line; to change them for the service, run
-`systemctl --user edit snoopy.service` and override `ExecStart`.
+Each flag has an environment variable (`SNOOPY_` plus the upper-cased flag
+name, `-` becoming `_`). Precedence: command-line flag, then environment
+variable, then built-in default; `snoopy -help` shows the effective defaults.
+Empty variables count as unset; an invalid value exits with status 2. The
+service reads optional files `/etc/snoopy/snoopy.conf` (all users), then
+`~/.config/snoopy/snoopy.conf` (your user, overriding); start from
+`/usr/share/doc/snoopy/snoopy.conf.example` and restart the service.
 
-| Flag | Default | Description |
-| --- | --- | --- |
-| `-out` | `~/.cache/snoopy/video` | Directory for recorded video segments |
-| `-segment` | `30m` | Duration of each recording segment |
-| `-pause` | `1s` | Settle time after stopping the previous segment (the next segment normally starts before the previous one stops; see [How recording works](#how-recording-works)) |
-| `-template` | `screen-%d-%t.webm` | Filename template passed to GNOME Shell |
-| `-health-check` | `15s` | Interval between D-Bus connection health checks |
-| `-addr` | `0.0.0.0` | HTTP bind address (see [Security](#security)) |
-| `-port` | `8900` | HTTP port |
-| `-image-interval` | `5s` | Interval between frames extracted for streaming |
-| `-image-cache-size` | `100` | Maximum number of JPEG frames kept in `~/.cache/snoopy/images` |
-| `-version` | | Print version information and exit |
+| Flag | Environment variable | Default | Description |
+| --- | --- | --- | --- |
+| `-out` | `SNOOPY_OUT` | `~/.cache/snoopy/video` | Directory for recorded video segments |
+| `-segment` | `SNOOPY_SEGMENT` | `30m` | Duration of each recording segment |
+| `-pause` | `SNOOPY_PAUSE` | `1s` | Settle time after stopping the previous segment (see [How recording works](#how-recording-works)) |
+| `-template` | `SNOOPY_TEMPLATE` | `screen-%d-%t.webm` | Filename template passed to GNOME Shell |
+| `-health-check` | `SNOOPY_HEALTH_CHECK` | `15s` | Interval between D-Bus connection health checks |
+| `-addr` | `SNOOPY_ADDR` | `127.0.0.1` | HTTP bind address; a loopback address (`127.0.0.1`, `::1`, `localhost`) also skips the mDNS advertisement (see [Security](#security)) |
+| `-port` | `SNOOPY_PORT` | `8900` | HTTP port |
+| `-image-interval` | `SNOOPY_IMAGE_INTERVAL` | `5s` | Interval between frames extracted for streaming |
+| `-image-cache-size` | `SNOOPY_IMAGE_CACHE_SIZE` | `100` | Maximum number of JPEG frames kept in `~/.cache/snoopy/images` |
+| `-version` | | | Print version information and exit |
 
 Recorded segments are never deleted by Snoopy; prune `~/.cache/snoopy/video`
 yourself (for example with a systemd timer or `find -mtime`).
 
 ## Web interface and API
 
-Open `http://<host>:8900/` in a browser for a live view that updates over SSE.
+Open `http://<host>:8900/` in a browser for a live view that updates over SSE
+(`http://127.0.0.1:8900/` with the default bind address).
 
 | Endpoint | Description |
 | --- | --- |
@@ -147,7 +169,7 @@ Open `http://<host>:8900/` in a browser for a live view that updates over SSE.
 | `GET /images/<uuid>.jpg` | A cached JPEG frame |
 | `GET /images/waiting.jpg` | Placeholder shown until the first frame is available |
 
-The mDNS advertisement (`_snoopy._tcp`) carries TXT records `ver=<version>`
+The mDNS advertisement (`_snoopy._tcp`, only when not bound to loopback) carries TXT records `ver=<version>`
 (the server's real version, as printed by `snoopy -version`; `dev` or a
 Go pseudo-version for local builds), `proto=http`, `path=/`, `sse=/sse/image` and
 `caps=stream,screencast`.
@@ -157,6 +179,12 @@ before 1.0.
 
 ## Mobile app
 
+> [!NOTE]
+> The app finds servers over mDNS, which needs the server
+> [exposed on the LAN](#expose-on-the-lan) (`SNOOPY_ADDR=0.0.0.0`). With the
+> default loopback bind (`127.0.0.1`) the server is neither reachable from the
+> phone nor advertised.
+
 **Install (Android):** download `snoopy_<version>_android.apk` from the
 [releases page](https://github.com/goodtune/snoopy/releases) and open it on
 the device (allow installing from unknown sources). If a release was built
@@ -165,10 +193,13 @@ you must uninstall a differently signed build first.
 
 **Use:**
 
-1. The selector screen lists Snoopy servers found via mDNS/Bonjour. The phone
-   must be on the same network segment as the server.
-2. Tap a server to open the full-screen viewer. New frames arrive over SSE and
-   are cached on the device; swipe to move through history and save a frame to
+1. The selector screen lists Snoopy servers found via mDNS/Bonjour. The server
+   must be [exposed on the LAN](#expose-on-the-lan) (with the default
+   `127.0.0.1` bind it is neither reachable nor advertised), and the phone must
+   be on the same network segment.
+2. Tap a server to open the full-screen viewer. New frames arrive over SSE
+   (the app reconnects with backoff if the stream drops, and closes the
+   connection when you leave the viewer) and are cached on the device; swipe to move through history and save a frame to
    the photo library.
 3. The cleanup screen shows cached frames per server and deletes them.
 
@@ -197,7 +228,7 @@ Image assets are stored in Git LFS; run `git lfs install` before cloning.
 ```bash
 cd server
 go test ./...
-go run . -addr 127.0.0.1      # needs a GNOME session
+go run .                       # needs a GNOME session; binds 127.0.0.1
 golangci-lint run              # config in server/.golangci.yml
 ```
 

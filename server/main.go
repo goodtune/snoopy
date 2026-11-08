@@ -19,6 +19,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -420,16 +421,20 @@ func main() {
 // Keeping os.Exit out of run lets deferred cleanup (stopping the screencast,
 // closing DBus connections, withdrawing the Avahi record) always execute.
 func realMain() int {
+	// Each flag's default comes from its SNOOPY_* environment variable when
+	// set, so the systemd unit can be configured through EnvironmentFile= and
+	// -help shows the effective default. An explicit flag still wins.
+	env := newEnvDefaults(os.LookupEnv)
 	var (
-		outDir              = flag.String("out", "", "Output directory (default: ~/.cache/snoopy/video)")
-		segment             = flag.Duration("segment", 30*time.Minute, "Segment duration")
-		pause               = flag.Duration("pause", 1*time.Second, "Pause between segments")
-		fileTemplate        = flag.String("template", "screen-%d-%t.webm", "Filename template used by GNOME Shell")
-		addr                = flag.String("addr", "0.0.0.0", "HTTP server bind address")
-		port                = flag.Int("port", 8900, "HTTP server port")
-		imageInterval       = flag.Duration("image-interval", 5*time.Second, "Interval between screen captures for web streaming")
-		imageCacheSize      = flag.Int("image-cache-size", 100, "Maximum number of images to keep in cache")
-		healthCheckInterval = flag.Duration("health-check", 15*time.Second, "Interval for DBus connection health checks")
+		outDir              = flag.String("out", env.string("out", ""), usage("out", "Output directory (empty: ~/.cache/snoopy/video)"))
+		segment             = flag.Duration("segment", env.duration("segment", 30*time.Minute), usage("segment", "Segment duration"))
+		pause               = flag.Duration("pause", env.duration("pause", 1*time.Second), usage("pause", "Pause between segments"))
+		fileTemplate        = flag.String("template", env.string("template", "screen-%d-%t.webm"), usage("template", "Filename template used by GNOME Shell"))
+		addr                = flag.String("addr", env.string("addr", "127.0.0.1"), usage("addr", "HTTP server bind address (0.0.0.0 exposes it on the LAN)"))
+		port                = flag.Int("port", env.int("port", 8900), usage("port", "HTTP server port"))
+		imageInterval       = flag.Duration("image-interval", env.duration("image-interval", 5*time.Second), usage("image-interval", "Interval between screen captures for web streaming"))
+		imageCacheSize      = flag.Int("image-cache-size", env.int("image-cache-size", 100), usage("image-cache-size", "Maximum number of images to keep in cache"))
+		healthCheckInterval = flag.Duration("health-check", env.duration("health-check", 15*time.Second), usage("health-check", "Interval for DBus connection health checks"))
 		showVersion         = flag.Bool("version", false, "Print version information and exit")
 	)
 	flag.Parse()
@@ -437,6 +442,11 @@ func realMain() int {
 	if *showVersion {
 		fmt.Printf("snoopy %s (commit %s, built %s)\n", buildVersion(), commit, date)
 		return 0
+	}
+
+	if err := env.err(); err != nil {
+		log.Printf("invalid environment: %v", err)
+		return 2
 	}
 
 	if *segment <= 0 || *healthCheckInterval <= 0 || *imageInterval <= 0 || *pause < 0 {
@@ -463,6 +473,100 @@ func realMain() int {
 		return 1
 	}
 	return 0
+}
+
+// envPrefix is prepended to a flag's name (upper-cased, "-" replaced by "_")
+// to form the environment variable that supplies its default.
+const envPrefix = "SNOOPY_"
+
+// envName returns the environment variable for flag name, e.g.
+// "image-interval" -> "SNOOPY_IMAGE_INTERVAL".
+func envName(name string) string {
+	return envPrefix + strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
+}
+
+// usage appends the flag's environment variable to its help text.
+func usage(name, text string) string {
+	return fmt.Sprintf("%s (env %s)", text, envName(name))
+}
+
+// envDefaults computes flag defaults from the environment, falling back to
+// the built-in default when the variable is unset or empty. Parse errors are
+// collected and reported together by err, so the caller can exit with the
+// invalid-flag status.
+type envDefaults struct {
+	lookup func(string) (string, bool)
+	errs   []error
+}
+
+func newEnvDefaults(lookup func(string) (string, bool)) *envDefaults {
+	return &envDefaults{lookup: lookup}
+}
+
+func (e *envDefaults) value(name string) (string, string, bool) {
+	key := envName(name)
+	v, ok := e.lookup(key)
+	v = strings.TrimSpace(v)
+	return key, v, ok && v != ""
+}
+
+func (e *envDefaults) string(name, def string) string {
+	if _, v, ok := e.value(name); ok {
+		return v
+	}
+	return def
+}
+
+func (e *envDefaults) duration(name string, def time.Duration) time.Duration {
+	key, v, ok := e.value(name)
+	if !ok {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		e.errs = append(e.errs, fmt.Errorf("%s=%q: not a duration (e.g. 30s, 5m, 1h)", key, v))
+		return def
+	}
+	return d
+}
+
+func (e *envDefaults) int(name string, def int) int {
+	key, v, ok := e.value(name)
+	if !ok {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		e.errs = append(e.errs, fmt.Errorf("%s=%q: not an integer", key, v))
+		return def
+	}
+	return n
+}
+
+// err reports every invalid variable on a single line, or nil.
+func (e *envDefaults) err() error {
+	if len(e.errs) == 0 {
+		return nil
+	}
+	msgs := make([]string, len(e.errs))
+	for i, err := range e.errs {
+		msgs[i] = err.Error()
+	}
+	return errors.New(strings.Join(msgs, "; "))
+}
+
+// shouldAdvertise reports whether the server should be announced over mDNS
+// when bound to addr. A loopback bind is unreachable from other machines, so
+// advertising it would only list a server that clients cannot connect to.
+func shouldAdvertise(addr string) bool {
+	host := strings.TrimSuffix(strings.TrimPrefix(addr, "["), "]")
+	if strings.EqualFold(host, "localhost") {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return false
+	}
+	return true
 }
 
 type options struct {
@@ -533,9 +637,10 @@ func run(o options) error {
 		go startScreenCaptureLoop(imageCache, broadcaster, o.imageInterval, o.outDir)
 	}
 
-	// Start Avahi service advertisement
-	avahiService, err := newAvahiService(o.port)
-	if err != nil {
+	// Start Avahi service advertisement, unless only reachable locally.
+	if !shouldAdvertise(o.addr) {
+		log.Printf("mDNS advertisement skipped: bound to loopback %s (set %s=0.0.0.0 to expose on the LAN)", o.addr, envName("addr"))
+	} else if avahiService, err := newAvahiService(o.port); err != nil {
 		log.Printf("Warning: Failed to start Avahi service: %v", err)
 		log.Printf("Service will not be advertised via mDNS/Bonjour")
 	} else {
