@@ -1,15 +1,25 @@
 version: 2
 
+# There is no go.mod at the repository root (the Go code lives in server/),
+# so the project name cannot be inferred.
+project_name: snoopy
+
 # Main build configuration
 builds:
   - id: snoopy
+    dir: server
     main: .
     binary: snoopy
     env:
       - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    mod_timestamp: "{{ .CommitTimestamp }}"
     ldflags:
       - -s -w
       - -X main.version={{ .Version }}
+      - -X main.commit={{ .Commit }}
+      - -X main.date={{ .Date }}
     targets:
       - linux_amd64
       - linux_arm64
@@ -28,26 +38,25 @@ archives:
       {{- else }}{{ .Arch }}{{ end }}
       {{- if .Arm }}v{{ .Arm }}{{ end }}
     files:
-      - AGENTS.md
+      - LICENSE
+      - README.md
+      - src: server/snoopy.service
+        strip_parent: true
+      - src: server/snoopy.conf.example
+        strip_parent: true
       - assets/snoopy-500.jpg
-      - snoopy.service
 
-# Linux packages (RPM only)
+# Linux packages (RPM and Debian)
 nfpms:
   - id: snoopy-packages
     package_name: snoopy
     ids:
       - snoopy
-    file_name_template: >-
-      {{ .ProjectName }}_
-      {{- .Version }}_
-      {{- .Os }}_
-      {{- if eq .Arch "amd64" }}x86_64
-      {{- else if eq .Arch "386" }}i386
-      {{- else }}{{ .Arch }}{{ end }}
+    # e.g. snoopy-0.1.0-1.x86_64.rpm and snoopy_0.1.0_amd64.deb
+    file_name_template: "{{ .ConventionalFileName }}"
     vendor: GoodTune
     homepage: https://github.com/goodtune/snoopy
-    maintainer: GoodTune <snoopy@goodtune.io>
+    maintainer: Gary Reynolds <gary@touch.asn.au>
     description: |
       Snoopy - Continuous screen recording and web-based streaming for GNOME-based Linux systems.
       Provides automated screencast recording in segments by interfacing with GNOME Shell's
@@ -56,6 +65,7 @@ nfpms:
     section: utils
     formats:
       - rpm
+      - deb
     bindir: /usr/bin
 
     # Package contents
@@ -63,7 +73,7 @@ nfpms:
       # Binary (already included by default in bindir)
 
       # Systemd service file
-      - src: snoopy.service
+      - src: server/snoopy.service
         dst: /usr/lib/systemd/user/snoopy.service
         file_info:
           mode: 0644
@@ -74,9 +84,22 @@ nfpms:
         file_info:
           mode: 0644
 
+      # Example configuration (copy to /etc/snoopy/snoopy.conf or
+      # ~/.config/snoopy/snoopy.conf)
+      - src: server/snoopy.conf.example
+        dst: /usr/share/doc/snoopy/snoopy.conf.example
+        file_info:
+          mode: 0644
+
       # Documentation
-      - src: AGENTS.md
+      - src: README.md
         dst: /usr/share/doc/snoopy/README.md
+        file_info:
+          mode: 0644
+
+      # License
+      - src: LICENSE
+        dst: /usr/share/licenses/snoopy/LICENSE
         file_info:
           mode: 0644
 
@@ -91,7 +114,6 @@ nfpms:
 
     # RPM-specific
     rpm:
-      group: Applications/Multimedia
       summary: Continuous screen recording with web streaming for GNOME
       compression: lzma
 
@@ -151,9 +173,16 @@ release:
 
     #### Linux (RPM-based: RHEL/CentOS/Fedora)
     ```bash
-    wget https://github.com/goodtune/snoopy/releases/download/{{ .Tag }}/snoopy_{{ .Version }}_linux_x86_64.rpm
-    sudo rpm -i snoopy_{{ .Version }}_linux_x86_64.rpm
-    # Enable and start the service (user session)
+    sudo dnf install https://github.com/goodtune/snoopy/releases/download/{{ .Tag }}/snoopy-{{ .Version }}-1.x86_64.rpm
+    # Not enabled automatically; enable it for your user (or see the README)
+    systemctl --user enable --now snoopy.service
+    ```
+
+    #### Linux (Debian/Ubuntu)
+    ```bash
+    wget https://github.com/goodtune/snoopy/releases/download/{{ .Tag }}/snoopy_{{ .Version }}_amd64.deb
+    sudo apt install ./snoopy_{{ .Version }}_amd64.deb
+    # Not enabled automatically; enable it for your user (or see the README)
     systemctl --user enable --now snoopy.service
     ```
 

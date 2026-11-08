@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"html/template"
 	"image"
 	"image/color"
 	"image/draw"
@@ -16,8 +18,11 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -43,6 +48,27 @@ const (
 	avahiIfaceUnspec     int32 = -1
 	avahiProtoUnspec     int32 = -1
 )
+
+// Build metadata, set at link time by GoReleaser via -X main.version=... etc.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
+// buildVersion returns the version stamped at link time, falling back to the
+// module version recorded by `go install` when built without ldflags.
+func buildVersion() string {
+	if version != "dev" {
+		return version
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		if v := bi.Main.Version; v != "" && v != "(devel)" {
+			return strings.TrimPrefix(v, "v")
+		}
+	}
+	return version
+}
 
 // ImageCache manages the image cache directory and provides access to images
 type ImageCache struct {
@@ -124,7 +150,7 @@ func newAvahiService(port int) (*AvahiService, error) {
 
 	// Create and advertise the service
 	if err := as.advertise(); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, err
 	}
 
@@ -152,7 +178,7 @@ func (as *AvahiService) advertise() error {
 			return fmt.Errorf("failed to register and no IP suffix available: %w", err)
 		}
 	}
-	
+
 	log.Printf("Avahi: advertising service '%s' on port %d", as.serviceName, as.port)
 	return nil
 }
@@ -209,8 +235,13 @@ func (as *AvahiService) tryAdvertise(name string) error {
 
 // prepareTXTRecords creates TXT records for the service
 func (as *AvahiService) prepareTXTRecords() [][]byte {
+	return txtRecords(buildVersion())
+}
+
+// txtRecords builds the mDNS TXT records advertised for the given version.
+func txtRecords(ver string) [][]byte {
 	records := []string{
-		"ver=1.0.0",
+		"ver=" + ver,
 		"proto=http",
 		"path=/",
 		"sse=/sse/image",
@@ -232,7 +263,12 @@ func (as *AvahiService) getIPSuffix() string {
 		log.Printf("Avahi: failed to get network interfaces: %v", err)
 		return ""
 	}
+	return ipSuffixFromAddrs(addrs)
+}
 
+// ipSuffixFromAddrs returns the last octet of the first non-loopback IPv4
+// address in addrs, or "" if there is none.
+func ipSuffixFromAddrs(addrs []net.Addr) string {
 	// Find the first non-loopback IPv4 address
 	for _, addr := range addrs {
 		if ipNet, ok := addr.(*net.IPNet); ok && !ipNet.IP.IsLoopback() {
@@ -316,9 +352,11 @@ func (ic *ImageCache) createWaitingImage(path string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-
-	return jpeg.Encode(f, img, &jpeg.Options{Quality: 90})
+	if err := jpeg.Encode(f, img, &jpeg.Options{Quality: 90}); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 func (ic *ImageCache) addImage(data []byte) (string, error) {
@@ -344,7 +382,7 @@ func (ic *ImageCache) addImage(data []byte) (string, error) {
 		toRemove := len(ic.images) - ic.maxImages
 		for i := 0; i < toRemove; i++ {
 			oldPath := filepath.Join(ic.dir, ic.images[i])
-			os.Remove(oldPath) // Ignore errors
+			_ = os.Remove(oldPath) // Ignore errors
 		}
 		ic.images = ic.images[toRemove:]
 	}
@@ -376,49 +414,219 @@ func checkDBusConnection(conn *dbus.Conn) error {
 }
 
 func main() {
+	os.Exit(realMain())
+}
+
+// realMain parses flags, runs the service and returns the process exit code.
+// Keeping os.Exit out of run lets deferred cleanup (stopping the screencast,
+// closing DBus connections, withdrawing the Avahi record) always execute.
+func realMain() int {
+	// Each flag's default comes from its SNOOPY_* environment variable when
+	// set, so the systemd unit can be configured through EnvironmentFile= and
+	// -help shows the effective default. An explicit flag still wins.
+	env := newEnvDefaults(os.LookupEnv)
 	var (
-		outDir           = flag.String("out", "", "Output directory (default: ~/.cache/snoopy/video)")
-		segment          = flag.Duration("segment", 30*time.Minute, "Segment duration")
-		pause            = flag.Duration("pause", 1*time.Second, "Pause between segments")
-		template         = flag.String("template", "screen-%d-%t.webm", "Filename template used by GNOME Shell")
-		addr             = flag.String("addr", "0.0.0.0", "HTTP server bind address")
-		port             = flag.Int("port", 8900, "HTTP server port")
-		imageInterval    = flag.Duration("image-interval", 5*time.Second, "Interval between screen captures for web streaming")
-		imageCacheSize   = flag.Int("image-cache-size", 100, "Maximum number of images to keep in cache")
-		healthCheckInterval = flag.Duration("health-check", 15*time.Second, "Interval for DBus connection health checks")
+		outDir              = flag.String("out", env.string("out", ""), usage("out", "Output directory (empty: ~/.cache/snoopy/video)"))
+		segment             = flag.Duration("segment", env.duration("segment", 30*time.Minute), usage("segment", "Segment duration"))
+		pause               = flag.Duration("pause", env.duration("pause", 1*time.Second), usage("pause", "Pause between segments"))
+		fileTemplate        = flag.String("template", env.string("template", "screen-%d-%t.webm"), usage("template", "Filename template used by GNOME Shell"))
+		addr                = flag.String("addr", env.string("addr", "127.0.0.1"), usage("addr", "HTTP server bind address (0.0.0.0 exposes it on the LAN)"))
+		port                = flag.Int("port", env.int("port", 8900), usage("port", "HTTP server port"))
+		imageInterval       = flag.Duration("image-interval", env.duration("image-interval", 5*time.Second), usage("image-interval", "Interval between screen captures for web streaming"))
+		imageCacheSize      = flag.Int("image-cache-size", env.int("image-cache-size", 100), usage("image-cache-size", "Maximum number of images to keep in cache"))
+		healthCheckInterval = flag.Duration("health-check", env.duration("health-check", 15*time.Second), usage("health-check", "Interval for DBus connection health checks"))
+		showVersion         = flag.Bool("version", false, "Print version information and exit")
 	)
 	flag.Parse()
 
+	if *showVersion {
+		fmt.Printf("snoopy %s (commit %s, built %s)\n", buildVersion(), commit, date)
+		return 0
+	}
+
+	if err := env.err(); err != nil {
+		log.Printf("invalid environment: %v", err)
+		return 2
+	}
+
+	if *segment <= 0 || *healthCheckInterval <= 0 || *imageInterval <= 0 || *pause < 0 {
+		log.Printf("-segment, -health-check and -image-interval must be positive and -pause must not be negative")
+		return 2
+	}
+
+	err := run(options{
+		outDir:         *outDir,
+		segment:        *segment,
+		pause:          *pause,
+		fileTemplate:   *fileTemplate,
+		addr:           *addr,
+		port:           *port,
+		imageInterval:  *imageInterval,
+		imageCacheSize: *imageCacheSize,
+		healthCheck:    *healthCheckInterval,
+	})
+	if err != nil {
+		log.Printf("ERROR: %v", err)
+		if errors.Is(err, errConnectionLost) {
+			log.Printf("Exiting with error code 1 for systemd restart")
+		}
+		return 1
+	}
+	return 0
+}
+
+// envPrefix is prepended to a flag's name (upper-cased, "-" replaced by "_")
+// to form the environment variable that supplies its default.
+const envPrefix = "SNOOPY_"
+
+// envName returns the environment variable for flag name, e.g.
+// "image-interval" -> "SNOOPY_IMAGE_INTERVAL".
+func envName(name string) string {
+	return envPrefix + strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
+}
+
+// usage appends the flag's environment variable to its help text.
+func usage(name, text string) string {
+	return fmt.Sprintf("%s (env %s)", text, envName(name))
+}
+
+// envDefaults computes flag defaults from the environment, falling back to
+// the built-in default when the variable is unset or empty. Parse errors are
+// collected and reported together by err, so the caller can exit with the
+// invalid-flag status.
+type envDefaults struct {
+	lookup func(string) (string, bool)
+	errs   []error
+}
+
+func newEnvDefaults(lookup func(string) (string, bool)) *envDefaults {
+	return &envDefaults{lookup: lookup}
+}
+
+func (e *envDefaults) value(name string) (string, string, bool) {
+	key := envName(name)
+	v, ok := e.lookup(key)
+	v = strings.TrimSpace(v)
+	return key, v, ok && v != ""
+}
+
+func (e *envDefaults) string(name, def string) string {
+	if _, v, ok := e.value(name); ok {
+		return v
+	}
+	return def
+}
+
+func (e *envDefaults) duration(name string, def time.Duration) time.Duration {
+	key, v, ok := e.value(name)
+	if !ok {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		e.errs = append(e.errs, fmt.Errorf("%s=%q: not a duration (e.g. 30s, 5m, 1h)", key, v))
+		return def
+	}
+	return d
+}
+
+func (e *envDefaults) int(name string, def int) int {
+	key, v, ok := e.value(name)
+	if !ok {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		e.errs = append(e.errs, fmt.Errorf("%s=%q: not an integer", key, v))
+		return def
+	}
+	return n
+}
+
+// err reports every invalid variable on a single line, or nil.
+func (e *envDefaults) err() error {
+	if len(e.errs) == 0 {
+		return nil
+	}
+	msgs := make([]string, len(e.errs))
+	for i, err := range e.errs {
+		msgs[i] = err.Error()
+	}
+	return errors.New(strings.Join(msgs, "; "))
+}
+
+// shouldAdvertise reports whether the server should be announced over mDNS
+// when bound to addr. A loopback bind is unreachable from other machines, so
+// advertising it would only list a server that clients cannot connect to.
+func shouldAdvertise(addr string) bool {
+	host := strings.TrimSuffix(strings.TrimPrefix(addr, "["), "]")
+	if strings.EqualFold(host, "localhost") {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return false
+	}
+	return true
+}
+
+type options struct {
+	outDir         string
+	segment        time.Duration
+	pause          time.Duration
+	fileTemplate   string
+	addr           string
+	port           int
+	imageInterval  time.Duration
+	imageCacheSize int
+	healthCheck    time.Duration
+}
+
+func run(o options) error {
+	log.Printf("snoopy %s starting", buildVersion())
+
 	home, err := os.UserHomeDir()
 	if err != nil {
-		log.Fatalf("UserHomeDir: %v", err)
+		return fmt.Errorf("UserHomeDir: %w", err)
 	}
-	if *outDir == "" {
-		*outDir = filepath.Join(home, ".cache", "snoopy", "video")
+	if o.outDir == "" {
+		o.outDir = filepath.Join(home, ".cache", "snoopy", "video")
 	}
-	if err := os.MkdirAll(*outDir, 0o755); err != nil {
-		log.Fatalf("mkdir %s: %v", *outDir, err)
+	if err := os.MkdirAll(o.outDir, 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", o.outDir, err)
 	}
 
 	// Setup image cache
 	cacheDir := filepath.Join(home, ".cache", "snoopy", "images")
-	imageCache, err := newImageCache(cacheDir, *imageCacheSize)
+	imageCache, err := newImageCache(cacheDir, o.imageCacheSize)
 	if err != nil {
-		log.Fatalf("Failed to create image cache: %v", err)
+		return fmt.Errorf("create image cache: %w", err)
 	}
 
 	// Setup SSE broadcaster
 	broadcaster := newSSEBroadcaster()
 
-	// Get username for default service name
+	// Get username for default service name. The page reads the name through
+	// an atomic so it reflects any rename Avahi makes after registration.
 	username := os.Getenv("USER")
 	if username == "" {
 		username = "unknown"
 	}
-	serviceName := username
+	var serviceName atomic.Value
+	serviceName.Store(username)
+	getServiceName := func() string { return serviceName.Load().(string) }
+
+	// Shut down on SIGINT/SIGTERM, or if the HTTP server fails.
+	sigCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
+	ctx, cancel := context.WithCancelCause(sigCtx)
+	defer cancel(nil)
 
 	// Start HTTP server
-	go startHTTPServer(*addr, *port, imageCache, broadcaster, serviceName)
+	go func() {
+		if err := startHTTPServer(o.addr, o.port, imageCache, broadcaster, getServiceName); err != nil {
+			cancel(fmt.Errorf("HTTP server failed: %w", err))
+		}
+	}()
 
 	// Start screen capture loop for web streaming
 	// Check if ffmpeg is available
@@ -426,107 +634,245 @@ func main() {
 		log.Printf("Warning: ffmpeg not found in PATH - web streaming will show static waiting image")
 		log.Printf("Install ffmpeg to enable live screen streaming feature")
 	} else {
-		go startScreenCaptureLoop(imageCache, broadcaster, *imageInterval, *outDir)
+		go startScreenCaptureLoop(imageCache, broadcaster, o.imageInterval, o.outDir)
 	}
 
-	// Start Avahi service advertisement
-	avahiService, err := newAvahiService(*port)
-	if err != nil {
+	// Start Avahi service advertisement, unless only reachable locally.
+	if !shouldAdvertise(o.addr) {
+		log.Printf("mDNS advertisement skipped: bound to loopback %s (set %s=0.0.0.0 to expose on the LAN)", o.addr, envName("addr"))
+	} else if avahiService, err := newAvahiService(o.port); err != nil {
 		log.Printf("Warning: Failed to start Avahi service: %v", err)
 		log.Printf("Service will not be advertised via mDNS/Bonjour")
 	} else {
-		defer avahiService.Close()
-		serviceName = avahiService.GetServiceName()
+		defer func() { _ = avahiService.Close() }()
+		serviceName.Store(avahiService.GetServiceName())
 		log.Printf("Avahi service started successfully")
 	}
 
-	// Setup signal handling for graceful shutdown
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	// Connect to the *session* bus (this must run in the logged-in user session).
-	conn, err := dbus.ConnectSessionBus()
+	// Connect to the *session* bus (this must run in the logged-in user
+	// session). GNOME Shell allows one recording per DBus client, so two
+	// independent connections are used and alternated between: the next
+	// segment is started on the idle connection before the current one is
+	// stopped, giving overlapping coverage with no gap.
+	connA, err := dbus.ConnectSessionBus()
 	if err != nil {
-		log.Fatalf("ConnectSessionBus: %v", err)
+		return fmt.Errorf("ConnectSessionBus: %w", err)
 	}
-	defer conn.Close()
-
-	obj := conn.Object(dest, dbus.ObjectPath(objPath))
-	ctx := context.Background()
-
-	fullTemplate := filepath.Join(*outDir, *template)
-
-	log.Printf("Starting screencast loop: out=%s segment=%s", *outDir, segment.String())
-	log.Printf("HTTP server running on http://%s:%d", *addr, *port)
-	log.Printf("DBus health check enabled: interval=%s", healthCheckInterval.String())
-
-	// Start the first recording
-	opts := map[string]dbus.Variant{}
-	call := obj.CallWithContext(ctx, startMethod, 0, fullTemplate, opts)
-	if call.Err != nil {
-		log.Fatalf("Failed to start initial screencast: %v", call.Err)
+	defer func() { _ = connA.Close() }()
+	connB, err := dbus.ConnectSessionBus()
+	if err != nil {
+		return fmt.Errorf("ConnectSessionBus (second connection): %w", err)
 	}
-	log.Printf("Started initial recording")
+	defer func() { _ = connB.Close() }()
 
-	// Create ticker for health checks
-	healthCheckTicker := time.NewTicker(*healthCheckInterval)
+	log.Printf("Starting screencast loop: out=%s segment=%s", o.outDir, o.segment)
+	log.Printf("HTTP server running on http://%s:%d", o.addr, o.port)
+	log.Printf("DBus health check enabled: interval=%s", o.healthCheck)
+
+	err = recordLoop(ctx, loopConfig{
+		template:    filepath.Join(o.outDir, o.fileTemplate),
+		segment:     o.segment,
+		pause:       o.pause,
+		healthCheck: o.healthCheck,
+		retryDelay:  5 * time.Second,
+	}, newDBusScreencaster(connA), newDBusScreencaster(connB))
+	if err != nil {
+		return err
+	}
+	if cause := context.Cause(ctx); cause != nil && !errors.Is(cause, context.Canceled) {
+		return cause
+	}
+	log.Printf("Shutdown complete")
+	return nil
+}
+
+// errConnectionLost is returned when the session bus goes away (for example
+// when the session is locked or suspended); systemd restarts the service.
+var errConnectionLost = errors.New("DBus session connection lost")
+
+// screencaster is one GNOME Shell screencast client (one DBus connection).
+type screencaster interface {
+	// Start begins a recording using the GNOME Shell filename template and
+	// returns the file being written.
+	Start(template string) (string, error)
+	// Stop ends this client's recording.
+	Stop() error
+	// Ping checks that the underlying DBus connection is alive.
+	Ping() error
+}
+
+const dbusCallTimeout = 10 * time.Second
+
+type dbusScreencaster struct {
+	conn *dbus.Conn
+	obj  dbus.BusObject
+}
+
+func newDBusScreencaster(conn *dbus.Conn) *dbusScreencaster {
+	return &dbusScreencaster{conn: conn, obj: conn.Object(dest, dbus.ObjectPath(objPath))}
+}
+
+func (d *dbusScreencaster) Start(template string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), dbusCallTimeout)
+	defer cancel()
+	var (
+		ok   bool
+		file string
+	)
+	err := d.obj.CallWithContext(ctx, startMethod, 0, template, map[string]dbus.Variant{}).Store(&ok, &file)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", errors.New("GNOME Shell refused to start screencast")
+	}
+	return file, nil
+}
+
+func (d *dbusScreencaster) Stop() error {
+	ctx, cancel := context.WithTimeout(context.Background(), dbusCallTimeout)
+	defer cancel()
+	return d.obj.CallWithContext(ctx, stopMethod, 0).Err
+}
+
+func (d *dbusScreencaster) Ping() error {
+	return checkDBusConnection(d.conn)
+}
+
+type loopConfig struct {
+	template    string
+	segment     time.Duration // length of each recording segment
+	pause       time.Duration // settle time after stopping the previous segment
+	healthCheck time.Duration // DBus ping interval
+	retryDelay  time.Duration // wait before retrying after a failed start
+}
+
+// recordLoop records consecutive segments, alternating between the two
+// screencasters, until ctx is cancelled (returns nil) or the DBus connection
+// is lost (returns an error wrapping errConnectionLost). The active recording
+// is always stopped before it returns.
+func recordLoop(ctx context.Context, cfg loopConfig, a, b screencaster) error {
+	file, err := a.Start(cfg.template)
+	if err != nil {
+		return fmt.Errorf("start initial screencast: %w", err)
+	}
+	log.Printf("Started initial recording: %s", file)
+
+	active, spare := a, b
+	defer func() {
+		if active == nil {
+			return
+		}
+		if err := active.Stop(); err != nil {
+			log.Printf("Stop screencast on exit failed: %v", err)
+		}
+	}()
+
+	ping := func() error {
+		for _, sc := range []screencaster{a, b} {
+			if err := sc.Ping(); err != nil {
+				return fmt.Errorf("%w: %v", errConnectionLost, err)
+			}
+		}
+		return nil
+	}
+
+	healthCheckTicker := time.NewTicker(cfg.healthCheck)
 	defer healthCheckTicker.Stop()
+
+	// The segment timer is created once and re-armed after each rotation; it
+	// must not be recreated per select iteration, or every health-check tick
+	// would restart the segment countdown.
+	segmentTimer := time.NewTimer(cfg.segment)
+	defer segmentTimer.Stop()
 
 	for {
 		select {
-		case <-sigChan:
-			// Received shutdown signal
-			log.Printf("\nReceived shutdown signal, cleaning up...")
-			// Stop the screencast
-			obj.CallWithContext(ctx, stopMethod, 0)
-			log.Printf("Shutdown complete")
-			return
+		case <-ctx.Done():
+			log.Printf("Received shutdown signal, cleaning up...")
+			return nil
 
 		case <-healthCheckTicker.C:
-			// Periodic health check for DBus connection
-			if err := checkDBusConnection(conn); err != nil {
-				log.Printf("ERROR: %v", err)
+			if err := ping(); err != nil {
 				log.Printf("DBus session connection lost (likely due to session pause/lock)")
-				log.Printf("Exiting with error code 1 for systemd restart")
-				// Stop the screencast before exiting
-				obj.CallWithContext(ctx, stopMethod, 0)
-				os.Exit(1)
+				return err
 			}
 
-		case <-time.After(*segment):
-			// Wait for the segment duration
-
-			// Start the next recording BEFORE stopping the current one
-			// This ensures continuous coverage with no gaps
-			call = obj.CallWithContext(ctx, startMethod, 0, fullTemplate, opts)
-			if call.Err != nil {
-				log.Printf("Start next screencast failed: %v", call.Err)
-				// Check if this is due to connection loss
-				if err := checkDBusConnection(conn); err != nil {
-					log.Printf("ERROR: DBus connection lost during segment rotation: %v", err)
-					log.Printf("Exiting with error code 1 for systemd restart")
-					os.Exit(1)
+		case <-segmentTimer.C:
+			if active == nil {
+				// A previous rotation left nothing recording; try again.
+				file, err := a.Start(cfg.template)
+				if err != nil {
+					log.Printf("Restart screencast failed: %v", err)
+					if perr := ping(); perr != nil {
+						return perr
+					}
+					segmentTimer.Reset(cfg.retryDelay)
+					continue
 				}
-				// If we can't start the next one, try to stop and restart cleanly
-				obj.CallWithContext(ctx, stopMethod, 0)
-				time.Sleep(5 * time.Second)
+				log.Printf("Restarted recording: %s", file)
+				active, spare = a, b
+				segmentTimer.Reset(cfg.segment)
 				continue
 			}
 
-			// Now stop the previous recording
-			// GNOME Shell may have already auto-stopped it when we started the new one
-			call = obj.CallWithContext(ctx, stopMethod, 0)
-			if call.Err != nil {
-				log.Printf("Stop previous screencast failed (may already be stopped): %v", call.Err)
-				// This is often okay - GNOME may auto-stop when starting a new one
+			next, err := rotate(ctx, active, spare, cfg.template, cfg.pause)
+			if err != nil {
+				log.Printf("Segment rotation failed, no recording active: %v", err)
+				if perr := ping(); perr != nil {
+					log.Printf("DBus connection lost during segment rotation")
+					return perr
+				}
+				active = nil
+				segmentTimer.Reset(cfg.retryDelay)
+				continue
 			}
-
-			// Brief pause to ensure clean transition
-			time.Sleep(*pause)
-
-			// Optional: print progress heartbeat
-			fmt.Print(".")
+			if next != active {
+				active, spare = next, active
+			}
+			segmentTimer.Reset(cfg.segment)
 		}
+	}
+}
+
+// rotate starts the next segment on spare BEFORE stopping cur so coverage
+// overlaps, then pauses briefly for cleanup. If spare cannot start, it falls
+// back to stopping cur and restarting on it (a gap of roughly pause). It
+// returns the screencaster now recording, or an error if none is.
+func rotate(ctx context.Context, cur, spare screencaster, template string, pause time.Duration) (screencaster, error) {
+	file, err := spare.Start(template)
+	if err == nil {
+		log.Printf("Started next recording: %s", file)
+		if err := cur.Stop(); err != nil {
+			log.Printf("Stop previous screencast failed (may already be stopped): %v", err)
+		}
+		sleepCtx(ctx, pause)
+		return spare, nil
+	}
+	log.Printf("Start next screencast failed, falling back to stop/start: %v", err)
+
+	if err := cur.Stop(); err != nil {
+		log.Printf("Stop screencast failed: %v", err)
+	}
+	sleepCtx(ctx, pause)
+	file, err = cur.Start(template)
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("Started next recording: %s", file)
+	return cur, nil
+}
+
+// sleepCtx sleeps for d or until ctx is done.
+func sleepCtx(ctx context.Context, d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+	case <-t.C:
 	}
 }
 
@@ -573,12 +919,12 @@ func startScreenCaptureLoop(cache *ImageCache, broadcaster *SSEBroadcaster, inte
 		jpegData, err := os.ReadFile(tmpFile)
 		if err != nil {
 			log.Printf("Failed to read extracted frame: %v", err)
-			os.Remove(tmpFile)
+			_ = os.Remove(tmpFile)
 			continue
 		}
 
 		// Remove temp file
-		os.Remove(tmpFile)
+		_ = os.Remove(tmpFile)
 
 		// Add to cache
 		filename, err := cache.addImage(jpegData)
@@ -652,7 +998,14 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func startHTTPServer(addr string, port int, cache *ImageCache, broadcaster *SSEBroadcaster, serviceName string) {
+func startHTTPServer(addr string, port int, cache *ImageCache, broadcaster *SSEBroadcaster, serviceName func() string) error {
+	listenAddr := net.JoinHostPort(addr, fmt.Sprint(port))
+	log.Printf("Starting HTTP server on %s", listenAddr)
+	return http.ListenAndServe(listenAddr, newHTTPHandler(cache, broadcaster, serviceName))
+}
+
+// newHTTPHandler builds the HTTP routes, wrapped with CORS headers.
+func newHTTPHandler(cache *ImageCache, broadcaster *SSEBroadcaster, serviceName func() string) http.Handler {
 	mux := http.NewServeMux()
 
 	// Serve static HTML at /
@@ -661,7 +1014,7 @@ func startHTTPServer(addr string, port int, cache *ImageCache, broadcaster *SSEB
 			http.NotFound(w, r)
 			return
 		}
-		serveIndexHTML(w, r, serviceName)
+		serveIndexHTML(w, r, serviceName())
 	})
 
 	// SSE endpoint
@@ -675,18 +1028,10 @@ func startHTTPServer(addr string, port int, cache *ImageCache, broadcaster *SSEB
 	})
 
 	// Wrap with CORS middleware
-	handler := corsMiddleware(mux)
-
-	listenAddr := fmt.Sprintf("%s:%d", addr, port)
-	log.Printf("Starting HTTP server on %s", listenAddr)
-
-	if err := http.ListenAndServe(listenAddr, handler); err != nil {
-		log.Fatalf("HTTP server failed: %v", err)
-	}
+	return corsMiddleware(mux)
 }
 
-func serveIndexHTML(w http.ResponseWriter, r *http.Request, serviceName string) {
-	html := fmt.Sprintf(`<!DOCTYPE html>
+var indexTemplate = template.Must(template.New("index").Parse(`<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -738,7 +1083,7 @@ func serveIndexHTML(w http.ResponseWriter, r *http.Request, serviceName string) 
     </style>
 </head>
 <body>
-    <h1>%s</h1>
+    <h1>{{.ServiceName}}</h1>
     <div class="status" id="status">Connecting...</div>
     <div class="container">
         <img id="screen" alt="Screen capture">
@@ -779,10 +1124,17 @@ func serveIndexHTML(w http.ResponseWriter, r *http.Request, serviceName string) 
         };
     </script>
 </body>
-</html>`, serviceName)
+</html>`))
+
+func serveIndexHTML(w http.ResponseWriter, _ *http.Request, serviceName string) {
+	var buf bytes.Buffer
+	if err := indexTemplate.Execute(&buf, struct{ ServiceName string }{serviceName}); err != nil {
+		http.Error(w, "failed to render page", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(html))
+	_, _ = w.Write(buf.Bytes())
 }
 
 func serveSSE(w http.ResponseWriter, r *http.Request, cache *ImageCache, broadcaster *SSEBroadcaster) {
@@ -798,7 +1150,9 @@ func serveSSE(w http.ResponseWriter, r *http.Request, cache *ImageCache, broadca
 
 	// Send initial image
 	initialImage := cache.getLatest()
-	fmt.Fprintf(w, "data: /images/%s\n\n", initialImage)
+	if _, err := fmt.Fprintf(w, "data: /images/%s\n\n", initialImage); err != nil {
+		return
+	}
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
@@ -810,7 +1164,9 @@ func serveSSE(w http.ResponseWriter, r *http.Request, cache *ImageCache, broadca
 		case <-ctx.Done():
 			return
 		case msg := <-clientChan:
-			fmt.Fprintf(w, "data: %s\n\n", msg)
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", msg); err != nil {
+				return
+			}
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
 			}

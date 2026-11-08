@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Snoopy servers are discovered on the local network via mDNS (_snoopy._tcp)
+  and serve their stream over plain HTTP (http://<lan-ip>:8900). Their
+  addresses are arbitrary LAN IPs/hostnames that cannot be enumerated in a
+  domain-config, so cleartext must be permitted in the base config.
+  Android blocks cleartext by default for targetSdk >= 28.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

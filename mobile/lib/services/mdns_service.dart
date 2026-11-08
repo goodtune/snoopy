@@ -1,93 +1,123 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
-import 'package:nsd/nsd.dart' as nsd;
-import '../models/snoopy_service.dart';
 
-class MdnsService {
+import 'package:flutter/foundation.dart';
+import 'package:nsd/nsd.dart' as nsd;
+
+import '../models/snoopy_service.dart';
+import 'service_discovery.dart';
+
+/// mDNS/Bonjour discovery of `_snoopy._tcp` services using `package:nsd`.
+class MdnsService implements ServiceDiscovery {
+  static const String serviceType = '_snoopy._tcp';
+
   nsd.Discovery? _discovery;
   final Map<String, SnoopyService> _services = {};
   final StreamController<List<SnoopyService>> _servicesController =
       StreamController<List<SnoopyService>>.broadcast();
 
+  @override
   Stream<List<SnoopyService>> get servicesStream => _servicesController.stream;
+
   List<SnoopyService> get services => _services.values.toList();
 
+  @override
   Future<void> startDiscovery() async {
-    _discovery = await nsd.startDiscovery('_snoopy._tcp', autoResolve: true);
-
-    _discovery!.addServiceListener((service, status) async {
-      if (status == nsd.ServiceStatus.found && service.name != null) {
-        try {
-          // Debug logging
-          print('mDNS Service found: ${service.name}');
-          print('  Host: ${service.host}');
-          print('  Port: ${service.port}');
-          print(
-            '  Addresses: ${service.addresses?.map((a) => a.address).toList()}',
-          );
-
-          // Service should already be resolved due to autoResolve: true
-          if (service.port != null) {
-            // Prefer IP address over hostname for better reliability
-            String? hostname;
-            if (service.addresses != null && service.addresses!.isNotEmpty) {
-              hostname = service.addresses!.first.address;
-              print('  Using IP address: $hostname');
-            } else if (service.host != null) {
-              // Strip trailing dot from hostname
-              final cleanHost = service.host!.replaceAll(RegExp(r'\.$'), '');
-
-              // Try to resolve hostname to IP address
-              try {
-                final addresses = await InternetAddress.lookup(cleanHost);
-                if (addresses.isNotEmpty) {
-                  hostname = addresses.first.address;
-                  print('  Resolved $cleanHost to IP: $hostname');
-                } else {
-                  hostname = cleanHost;
-                  print('  Using hostname (resolution failed): $hostname');
-                }
-              } catch (e) {
-                hostname = cleanHost;
-                print('  Using hostname (resolution error: $e): $hostname');
-              }
-            }
-
-            if (hostname != null) {
-              final snoopyService = SnoopyService(
-                name: service.name ?? 'Unknown',
-                hostname: hostname,
-                port: service.port!,
-                txt:
-                    service.txt?.map(
-                      (key, value) => MapEntry(key, value.toString()),
-                    ) ??
-                    {},
-              );
-
-              _services[snoopyService.name] = snoopyService;
-              _servicesController.add(_services.values.toList());
-            }
-          }
-        } catch (e) {
-          print('Error processing service: $e');
-        }
-      } else if (status == nsd.ServiceStatus.lost && service.name != null) {
-        _services.remove(service.name);
-        _servicesController.add(_services.values.toList());
-      }
-    });
+    await stopDiscovery();
+    final discovery = await nsd.startDiscovery(
+      serviceType,
+      ipLookupType: nsd.IpLookupType.any,
+    );
+    _discovery = discovery;
+    discovery.addServiceListener(_onServiceChanged);
   }
 
-  Future<void> stopDiscovery() async {
-    if (_discovery != null) {
-      await nsd.stopDiscovery(_discovery!);
-      _discovery = null;
+  Future<void> _onServiceChanged(
+    nsd.Service service,
+    nsd.ServiceStatus status,
+  ) async {
+    final name = service.name;
+    if (name == null) return;
+
+    if (status == nsd.ServiceStatus.lost) {
+      _services.remove(name);
+      _emit();
+      return;
+    }
+
+    debugPrint(
+      'mDNS service found: $name host=${service.host} port=${service.port} '
+      'addresses=${service.addresses?.map((a) => a.address).toList()}',
+    );
+
+    final port = service.port;
+    if (port == null) return;
+
+    try {
+      final hostname = await _resolveHost(service);
+      if (hostname == null) return;
+      _services[name] = SnoopyService(
+        name: name,
+        hostname: hostname,
+        port: port,
+        txt:
+            service.txt?.map(
+              (key, value) => MapEntry(
+                key,
+                value == null ? '' : utf8.decode(value, allowMalformed: true),
+              ),
+            ) ??
+            const {},
+      );
+      _emit();
+    } on Exception catch (e) {
+      debugPrint('Error processing mDNS service $name: $e');
     }
   }
 
-  void dispose() {
-    stopDiscovery();
-    _servicesController.close();
+  /// Prefers an IPv4 address advertised with the service, then any address,
+  /// then a DNS lookup of the advertised host name.
+  static Future<String?> _resolveHost(nsd.Service service) async {
+    final addresses = service.addresses;
+    if (addresses != null && addresses.isNotEmpty) {
+      final address = addresses.firstWhere(
+        (a) => a.type == InternetAddressType.IPv4,
+        orElse: () => addresses.first,
+      );
+      return address.address;
+    }
+
+    final host = service.host;
+    if (host == null) return null;
+    final cleanHost = host.replaceAll(RegExp(r'\.$'), '');
+    try {
+      final resolved = await InternetAddress.lookup(cleanHost);
+      if (resolved.isNotEmpty) return resolved.first.address;
+    } on SocketException catch (e) {
+      debugPrint('Could not resolve $cleanHost: $e');
+    }
+    return cleanHost;
+  }
+
+  void _emit() {
+    if (!_servicesController.isClosed) {
+      _servicesController.add(_services.values.toList());
+    }
+  }
+
+  @override
+  Future<void> stopDiscovery() async {
+    final discovery = _discovery;
+    _discovery = null;
+    if (discovery != null) {
+      await nsd.stopDiscovery(discovery);
+    }
+  }
+
+  @override
+  Future<void> dispose() async {
+    await stopDiscovery();
+    await _servicesController.close();
   }
 }

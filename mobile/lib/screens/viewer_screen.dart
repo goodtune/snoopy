@@ -1,164 +1,106 @@
-import 'dart:io';
+import 'dart:async';
+
 import 'package:flutter/material.dart';
-import 'package:image_gallery_saver/image_gallery_saver.dart';
-import 'package:permission_handler/permission_handler.dart';
-import 'package:path_provider/path_provider.dart';
-import '../models/snoopy_service.dart';
+import 'package:flutter/services.dart';
+import 'package:gal/gal.dart';
+
 import '../models/cached_image.dart';
-import '../services/sse_service.dart';
+import '../models/snoopy_service.dart';
+import '../services/image_feed.dart';
 import '../services/storage_service.dart';
 
 class ViewerScreen extends StatefulWidget {
   final SnoopyService service;
+  final ImageFeedFactory imageFeedFactory;
 
-  const ViewerScreen({super.key, required this.service});
+  const ViewerScreen({
+    super.key,
+    required this.service,
+    required this.imageFeedFactory,
+  });
 
   @override
   State<ViewerScreen> createState() => _ViewerScreenState();
 }
 
 class _ViewerScreenState extends State<ViewerScreen> {
-  late SseService _sseService;
-  late StorageService _storageService;
+  late final ImageFeed _feed;
+  final StorageService _storageService = StorageService();
+  StreamSubscription<CachedImage>? _subscription;
   final List<CachedImage> _images = [];
   int _currentIndex = 0;
   bool _isFullscreen = true;
-  bool _isConnected = false;
+  bool _isSaving = false;
 
   @override
   void initState() {
     super.initState();
-    _sseService = SseService(widget.service);
-    _storageService = StorageService();
-    _connectToService();
-  }
-
-  Future<void> _connectToService() async {
-    setState(() {
-      _isConnected = true;
-    });
-
-    _sseService.imageStream.listen((image) {
+    _feed = widget.imageFeedFactory(widget.service);
+    _subscription = _feed.imageStream.listen((image) {
+      if (!mounted) return;
       setState(() {
         _images.insert(0, image);
         _currentIndex = 0;
       });
-      _storageService.saveImage(image);
+      unawaited(_storageService.saveImage(image));
     });
-
-    await _sseService.connect();
+    unawaited(_feed.connect());
   }
 
   @override
   void dispose() {
-    _sseService.dispose();
+    unawaited(_subscription?.cancel());
+    unawaited(_feed.dispose());
     super.dispose();
   }
 
   void _toggleFullscreen() {
-    setState(() {
-      _isFullscreen = !_isFullscreen;
-    });
+    setState(() => _isFullscreen = !_isFullscreen);
   }
 
   Future<void> _saveCurrentImage() async {
-    if (_images.isEmpty) return;
+    if (_images.isEmpty || _isSaving) return;
+    final image = _images[_currentIndex];
+    final messenger = ScaffoldMessenger.of(context);
 
-    final currentImage = _images[_currentIndex];
+    void show(String message) {
+      messenger.showSnackBar(SnackBar(content: Text(message)));
+    }
 
-    // Check platform
-    if (Platform.isMacOS || Platform.isWindows || Platform.isLinux) {
-      // Desktop: Save to Downloads folder
-      try {
-        final downloadsDir = await getDownloadsDirectory();
-        if (downloadsDir != null) {
-          // Clean up the filename - remove path separators and ensure single extension
-          String cleanFileName = currentImage.imageId
-              .replaceAll('/', '_')
-              .replaceAll('\\', '_');
-
-          // Ensure .jpg extension (and avoid double extension)
-          if (!cleanFileName.endsWith('.jpg')) {
-            cleanFileName = '$cleanFileName.jpg';
-          }
-
-          final filePath = '${downloadsDir.path}/$cleanFileName';
-          final file = File(filePath);
-          await file.writeAsBytes(currentImage.imageData);
-
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('Image saved to Downloads: $cleanFileName'),
-                duration: const Duration(seconds: 2),
-              ),
-            );
-          }
-        } else {
-          throw Exception('Could not access Downloads directory');
-        }
-      } catch (e) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Failed to save image: $e'),
-              duration: const Duration(seconds: 3),
-            ),
-          );
-        }
-      }
-    } else {
-      // Mobile (iOS/Android): Use image_gallery_saver with permissions
-      final status = await Permission.photosAddOnly.request();
-
-      if (status.isGranted || status.isLimited) {
-        final result = await ImageGallerySaver.saveImage(
-          currentImage.imageData,
-          name: currentImage.fileName,
+    setState(() => _isSaving = true);
+    try {
+      if (!await Gal.requestAccess()) {
+        show(
+          'Permission to save to Photos was denied. '
+          'You can enable it in Settings.',
         );
-
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                result['isSuccess']
-                    ? 'Image saved to gallery'
-                    : 'Failed to save image',
-              ),
-            ),
-          );
-        }
-      } else if (status.isPermanentlyDenied) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: const Text(
-                'Permission permanently denied. Please enable in Settings.',
-              ),
-              action: SnackBarAction(
-                label: 'Settings',
-                onPressed: () => openAppSettings(),
-              ),
-            ),
-          );
-        }
-      } else {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Permission denied to save images')),
-          );
-        }
+        return;
       }
+      await Gal.putImageBytes(image.imageData, name: image.baseName);
+      show('Image saved to gallery');
+    } on GalException catch (e) {
+      debugPrint('Saving to gallery failed: $e');
+      show(switch (e.type) {
+        GalExceptionType.accessDenied =>
+          'Permission to save to Photos was denied. '
+              'You can enable it in Settings.',
+        GalExceptionType.notEnoughSpace => 'Not enough storage to save image',
+        GalExceptionType.notSupportedFormat => 'Image format not supported',
+        GalExceptionType.unexpected => 'Failed to save image',
+      });
+    } on PlatformException catch (e) {
+      debugPrint('Saving to gallery failed: $e');
+      show('Failed to save image');
+    } finally {
+      if (mounted) setState(() => _isSaving = false);
     }
   }
 
   void _navigateToImage(int delta) {
-    setState(() {
-      final newIndex = _currentIndex + delta;
-      if (newIndex >= 0 && newIndex < _images.length) {
-        _currentIndex = newIndex;
-      }
-    });
+    final newIndex = _currentIndex + delta;
+    if (newIndex >= 0 && newIndex < _images.length) {
+      setState(() => _currentIndex = newIndex);
+    }
   }
 
   @override
@@ -174,10 +116,12 @@ class _ViewerScreenState extends State<ViewerScreen> {
               actions: [
                 IconButton(
                   icon: const Icon(Icons.save),
-                  onPressed: _saveCurrentImage,
+                  tooltip: 'Save to gallery',
+                  onPressed: _isSaving ? null : _saveCurrentImage,
                 ),
                 IconButton(
                   icon: const Icon(Icons.fullscreen),
+                  tooltip: 'Fullscreen',
                   onPressed: _toggleFullscreen,
                 ),
               ],
@@ -206,10 +150,11 @@ class _ViewerScreenState extends State<ViewerScreen> {
     return GestureDetector(
       onTap: _toggleFullscreen,
       onHorizontalDragEnd: (details) {
-        if (details.primaryVelocity! > 0) {
+        final velocity = details.primaryVelocity ?? 0;
+        if (velocity > 0) {
           // Swipe right - go to older image
           _navigateToImage(1);
-        } else if (details.primaryVelocity! < 0) {
+        } else if (velocity < 0) {
           // Swipe left - go to newer image
           _navigateToImage(-1);
         }
@@ -221,6 +166,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
             child: Image.memory(
               _images[_currentIndex].imageData,
               fit: BoxFit.contain,
+              gaplessPlayback: true,
             ),
           ),
           if (!_isFullscreen)
@@ -228,49 +174,54 @@ class _ViewerScreenState extends State<ViewerScreen> {
               bottom: 16,
               left: 16,
               right: 16,
-              child: Container(
-                padding: const EdgeInsets.all(8),
+              child: DecoratedBox(
                 decoration: BoxDecoration(
                   color: Colors.black54,
                   borderRadius: BorderRadius.circular(8),
                 ),
-                child: Column(
-                  children: [
-                    Text(
-                      'Image ${_currentIndex + 1} of ${_images.length}',
-                      style: const TextStyle(color: Colors.white),
-                    ),
-                    const SizedBox(height: 8),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        IconButton(
-                          icon: const Icon(
-                            Icons.arrow_back,
-                            color: Colors.white,
+                child: Padding(
+                  padding: const EdgeInsets.all(8),
+                  child: Column(
+                    children: [
+                      Text(
+                        'Image ${_currentIndex + 1} of ${_images.length}',
+                        style: const TextStyle(color: Colors.white),
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          IconButton(
+                            icon: const Icon(
+                              Icons.arrow_back,
+                              color: Colors.white,
+                            ),
+                            tooltip: 'Older',
+                            onPressed: _currentIndex < _images.length - 1
+                                ? () => _navigateToImage(1)
+                                : null,
                           ),
-                          onPressed: _currentIndex < _images.length - 1
-                              ? () => _navigateToImage(1)
-                              : null,
-                        ),
-                        const SizedBox(width: 16),
-                        IconButton(
-                          icon: const Icon(Icons.save, color: Colors.white),
-                          onPressed: _saveCurrentImage,
-                        ),
-                        const SizedBox(width: 16),
-                        IconButton(
-                          icon: const Icon(
-                            Icons.arrow_forward,
-                            color: Colors.white,
+                          const SizedBox(width: 16),
+                          IconButton(
+                            icon: const Icon(Icons.save, color: Colors.white),
+                            tooltip: 'Save to gallery',
+                            onPressed: _isSaving ? null : _saveCurrentImage,
                           ),
-                          onPressed: _currentIndex > 0
-                              ? () => _navigateToImage(-1)
-                              : null,
-                        ),
-                      ],
-                    ),
-                  ],
+                          const SizedBox(width: 16),
+                          IconButton(
+                            icon: const Icon(
+                              Icons.arrow_forward,
+                              color: Colors.white,
+                            ),
+                            tooltip: 'Newer',
+                            onPressed: _currentIndex > 0
+                                ? () => _navigateToImage(-1)
+                                : null,
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
