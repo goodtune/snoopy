@@ -1,74 +1,58 @@
 import 'dart:io';
-import 'dart:typed_data';
+
+import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
+
 import '../models/cached_image.dart';
 
+/// Persists received images in the app's documents directory.
 class StorageService {
   static const String _imageDirectory = 'snoopy_images';
 
-  Future<String> get _localPath async {
-    final directory = await getApplicationDocumentsDirectory();
-    final imageDir = Directory('${directory.path}/$_imageDirectory');
-    if (!await imageDir.exists()) {
+  Future<Directory> get _directory async {
+    final documents = await getApplicationDocumentsDirectory();
+    final imageDir = Directory('${documents.path}/$_imageDirectory');
+    if (!imageDir.existsSync()) {
       await imageDir.create(recursive: true);
     }
-    return imageDir.path;
+    return imageDir;
   }
+
+  Future<File> _fileFor(CachedImage image) async =>
+      File('${(await _directory).path}/${image.fileName}');
 
   Future<void> saveImage(CachedImage image) async {
     try {
-      final path = await _localPath;
-      final file = File('$path/${image.fileName}');
-      await file.writeAsBytes(image.imageData);
-    } catch (e) {
-      print('Error saving image: $e');
+      await (await _fileFor(image)).writeAsBytes(image.imageData);
+    } on Exception catch (e) {
+      debugPrint('Error saving image: $e');
     }
   }
 
+  /// Loads all cached images, newest first.
   Future<List<CachedImage>> loadAllImages() async {
     try {
-      final path = await _localPath;
-      final directory = Directory(path);
-
-      if (!await directory.exists()) {
-        return [];
-      }
-
-      final files = await directory.list().toList();
+      final directory = await _directory;
       final images = <CachedImage>[];
 
-      for (final file in files) {
-        if (file is File && file.path.endsWith('.jpg')) {
-          try {
-            final fileName = file.path.split('/').last;
-            final parts = fileName.replaceAll('.jpg', '').split('_');
-
-            if (parts.length >= 3) {
-              final serviceName = parts[0];
-              final timestamp =
-                  DateTime.fromMillisecondsSinceEpoch(int.parse(parts[1]));
-              final imageId = parts.sublist(2).join('_');
-              final imageData = await file.readAsBytes();
-
-              images.add(CachedImage(
-                serviceName: serviceName,
-                imageId: imageId,
-                timestamp: timestamp,
-                imageData: imageData,
-              ));
-            }
-          } catch (e) {
-            print('Error loading image file ${file.path}: $e');
-          }
+      await for (final entity in directory.list()) {
+        if (entity is! File) continue;
+        final fileName = entity.uri.pathSegments.last;
+        try {
+          final image = CachedImage.fromFileName(
+            fileName,
+            await entity.readAsBytes(),
+          );
+          if (image != null) images.add(image);
+        } on Exception catch (e) {
+          debugPrint('Error loading image file ${entity.path}: $e');
         }
       }
 
-      // Sort by timestamp descending (newest first)
       images.sort((a, b) => b.timestamp.compareTo(a.timestamp));
-
       return images;
-    } catch (e) {
-      print('Error loading images: $e');
+    } on Exception catch (e) {
+      debugPrint('Error loading images: $e');
       return [];
     }
   }
@@ -80,58 +64,42 @@ class StorageService {
 
   Future<Map<String, List<CachedImage>>> loadImagesGroupedByService() async {
     final allImages = await loadAllImages();
-    final Map<String, List<CachedImage>> grouped = {};
-
+    final grouped = <String, List<CachedImage>>{};
     for (final image in allImages) {
       grouped.putIfAbsent(image.serviceName, () => []).add(image);
     }
-
     return grouped;
   }
 
   Future<void> deleteImage(CachedImage image) async {
     try {
-      final path = await _localPath;
-      final file = File('$path/${image.fileName}');
-      if (await file.exists()) {
+      final file = await _fileFor(image);
+      if (file.existsSync()) {
         await file.delete();
       }
-    } catch (e) {
-      print('Error deleting image: $e');
+    } on Exception catch (e) {
+      debugPrint('Error deleting image: $e');
     }
   }
 
   Future<void> deleteAllImagesForService(String serviceName) async {
-    try {
-      final images = await loadImagesByService(serviceName);
-      for (final image in images) {
-        await deleteImage(image);
-      }
-    } catch (e) {
-      print('Error deleting images for service: $e');
+    for (final image in await loadImagesByService(serviceName)) {
+      await deleteImage(image);
     }
   }
 
   Future<void> deleteAllImages() async {
     try {
-      final path = await _localPath;
-      final directory = Directory(path);
-      if (await directory.exists()) {
-        await directory.delete(recursive: true);
-        await directory.create(recursive: true);
-      }
-    } catch (e) {
-      print('Error deleting all images: $e');
+      final directory = await _directory;
+      await directory.delete(recursive: true);
+      await directory.create(recursive: true);
+    } on Exception catch (e) {
+      debugPrint('Error deleting all images: $e');
     }
   }
 
-  Future<int> getTotalImageCount() async {
-    final images = await loadAllImages();
-    return images.length;
-  }
+  Future<int> getTotalImageCount() async => (await loadAllImages()).length;
 
-  Future<int> getServiceImageCount(String serviceName) async {
-    final images = await loadImagesByService(serviceName);
-    return images.length;
-  }
+  Future<int> getServiceImageCount(String serviceName) async =>
+      (await loadImagesByService(serviceName)).length;
 }

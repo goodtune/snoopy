@@ -53,8 +53,6 @@
 	</array>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Snoopy needs permission to save screenshots to your photo library</string>
-	<key>NSPhotoLibraryUsageDescription</key>
-	<string>Snoopy needs permission to access your photo library</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>

@@ -1,23 +1,28 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
+
 import 'screens/selector_screen.dart';
+import 'services/image_feed.dart';
+import 'services/service_discovery.dart';
 
 void main() {
   runApp(const SnoopyApp());
 }
 
 class SnoopyApp extends StatelessWidget {
-  const SnoopyApp({super.key});
+  /// Overrides service discovery (defaults to mDNS). Used by tests.
+  final ServiceDiscovery Function()? discoveryFactory;
+
+  /// Overrides how image feeds are created (defaults to SSE). Used by tests.
+  final ImageFeedFactory? imageFeedFactory;
+
+  const SnoopyApp({super.key, this.discoveryFactory, this.imageFeedFactory});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Snoopy',
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: Colors.blue,
-          brightness: Brightness.light,
-        ),
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
         useMaterial3: true,
       ),
       darkTheme: ThemeData(
@@ -27,8 +32,10 @@ class SnoopyApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      themeMode: ThemeMode.system,
-      home: const SelectorScreen(),
+      home: SelectorScreen(
+        discoveryFactory: discoveryFactory,
+        imageFeedFactory: imageFeedFactory,
+      ),
       debugShowCheckedModeBanner: false,
     );
   }

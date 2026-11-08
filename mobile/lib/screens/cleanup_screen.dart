@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+
 import '../models/cached_image.dart';
 import '../services/storage_service.dart';
 
@@ -17,7 +20,7 @@ class _CleanupScreenState extends State<CleanupScreen> {
   @override
   void initState() {
     super.initState();
-    _loadImages();
+    unawaited(_loadImages());
   }
 
   Future<void> _loadImages() async {
@@ -26,6 +29,7 @@ class _CleanupScreenState extends State<CleanupScreen> {
     });
 
     final images = await _storageService.loadImagesGroupedByService();
+    if (!mounted) return;
 
     setState(() {
       _groupedImages = images;
@@ -38,9 +42,8 @@ class _CleanupScreenState extends State<CleanupScreen> {
     await _loadImages();
 
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Image deleted')),
-      );
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Image deleted')));
     }
   }
 
@@ -99,9 +102,8 @@ class _CleanupScreenState extends State<CleanupScreen> {
       await _loadImages();
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('All images deleted')),
-        );
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('All images deleted')));
       }
     }
   }
@@ -151,7 +153,7 @@ class _CleanupScreenState extends State<CleanupScreen> {
           subtitle: Text('${images.length} images'),
           trailing: IconButton(
             icon: const Icon(Icons.delete),
-            onPressed: () => _deleteAllImagesForService(serviceName),
+            onPressed: () => unawaited(_deleteAllImagesForService(serviceName)),
           ),
           children: [
             GridView.builder(
@@ -168,14 +170,11 @@ class _CleanupScreenState extends State<CleanupScreen> {
                 final image = images[imageIndex];
                 return GestureDetector(
                   onTap: () => _showImageDialog(image),
-                  onLongPress: () => _deleteImage(image),
+                  onLongPress: () => unawaited(_deleteImage(image)),
                   child: Stack(
                     fit: StackFit.expand,
                     children: [
-                      Image.memory(
-                        image.imageData,
-                        fit: BoxFit.cover,
-                      ),
+                      Image.memory(image.imageData, fit: BoxFit.cover),
                       Positioned(
                         bottom: 4,
                         right: 4,
@@ -206,7 +205,11 @@ class _CleanupScreenState extends State<CleanupScreen> {
   }
 
   void _showImageDialog(CachedImage image) {
-    showDialog(
+    unawaited(_imageDialog(image));
+  }
+
+  Future<void> _imageDialog(CachedImage image) {
+    return showDialog<void>(
       context: context,
       builder: (context) => Dialog(
         child: Column(
@@ -227,7 +230,7 @@ class _CleanupScreenState extends State<CleanupScreen> {
                       TextButton(
                         onPressed: () {
                           Navigator.pop(context);
-                          _deleteImage(image);
+                          unawaited(_deleteImage(image));
                         },
                         child: const Text('Delete'),
                       ),
