@@ -1,0 +1,49 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", "schedule:weekly"],
+  "semanticCommits": "enabled",
+  "labels": ["dependencies"],
+  "enabledManagers": [
+    "gomod",
+    "pub",
+    "gradle",
+    "gradle-wrapper",
+    "github-actions",
+    "custom.regex"
+  ],
+  "postUpdateOptions": ["gomodTidy"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Flutter SDK version pinned in GitHub Actions workflows",
+      "managerFilePatterns": ["/^\\.github/workflows/[^/]+\\.ya?ml$/"],
+      "matchStrings": ["FLUTTER_VERSION: (?<currentValue>\\d+\\.\\d+\\.\\d+)"],
+      "depNameTemplate": "flutter",
+      "datasourceTemplate": "flutter-version"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Group golang.org/x modules",
+      "matchManagers": ["gomod"],
+      "matchPackageNames": ["golang.org/x/**"],
+      "groupName": "golang.org/x"
+    },
+    {
+      "description": "Group all GitHub Actions updates",
+      "matchManagers": ["github-actions"],
+      "groupName": "GitHub Actions"
+    },
+    {
+      "description": "Group Android Gradle tooling",
+      "matchManagers": ["gradle", "gradle-wrapper"],
+      "groupName": "Android Gradle tooling"
+    },
+    {
+      "description": "Group non-major dev dependency updates",
+      "matchDepTypes": ["dev_dependencies"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "dev dependencies (non-major)"
+    }
+  ]
+}

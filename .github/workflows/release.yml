@@ -1,0 +1,118 @@
+name: release
+
+# A single vX.Y.Z tag releases the whole monorepo:
+#   1. GoReleaser builds the server and creates the GitHub release
+#      (tar.gz, rpm, deb, checksums).
+#   2. The android job builds the APK and uploads it to that same release.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  FLUTTER_VERSION: 3.47.9
+
+jobs:
+  goreleaser:
+    name: goreleaser
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          lfs: true
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache-dependency-path: server/go.sum
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  android:
+    name: android apk
+    needs: goreleaser
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          lfs: true
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+          cache-dependency-path: |
+            mobile/android/*.gradle*
+            mobile/android/gradle/wrapper/gradle-wrapper.properties
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      # Release signing is optional. When the ANDROID_KEYSTORE_BASE64,
+      # ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS and ANDROID_KEY_PASSWORD
+      # repository secrets are set, the APK is signed with the upload key.
+      # Without them, android/app/build.gradle.kts falls back to the debug key
+      # and the APK is only suitable for sideloading (it cannot be updated by
+      # a store-signed build and must be uninstalled first).
+      # Secrets cannot be referenced in `if:`, so test them via a step output.
+      - name: Detect signing secrets
+        id: signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Android signing secrets not set; the release APK will be debug-signed (sideload only)."
+          fi
+      - name: Configure release signing
+        if: steps.signing.outputs.enabled == 'true'
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/app/upload-keystore.jks
+          {
+            echo "storePassword=$ANDROID_KEYSTORE_PASSWORD"
+            echo "keyPassword=$ANDROID_KEY_PASSWORD"
+            echo "keyAlias=$ANDROID_KEY_ALIAS"
+            echo "storeFile=upload-keystore.jks"
+          } > android/key.properties
+
+      - run: flutter pub get
+      - name: Build release APK
+        run: |
+          flutter build apk --release \
+            --build-name="${GITHUB_REF_NAME#v}" \
+            --build-number="${{ github.run_number }}"
+      - name: Upload APK to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          apk="snoopy_${version}_android.apk"
+          mv build/app/outputs/flutter-apk/app-release.apk "$apk"
+          gh release upload "$GITHUB_REF_NAME" "$apk" --clobber --repo "$GITHUB_REPOSITORY"
+      - name: Remove signing material
+        if: always()
+        run: rm -f android/app/upload-keystore.jks android/key.properties

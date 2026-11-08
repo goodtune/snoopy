@@ -1,98 +1,99 @@
 <p align="center">
-   <img src="assets/snoopy-500.jpg" width="350" />
+   <img src="assets/snoopy-500.jpg" width="200" />
 </p>
 
-## Summary
+# Notes for contributors and agents
 
-**Snoopy** is a Go program that provides **continuous screen recording and web-based streaming** for GNOME-based Linux systems. Here's what it does:
+`README.md` is the single user-facing document (what Snoopy is, install,
+flags, endpoints, security, mobile app, release secrets). This file covers how
+the repository is put together and the conventions to follow. Do not
+duplicate README content here.
 
-### Core Functionality
-- **Automated Screencast Recording**: Continuously records your screen in segments by interfacing with GNOME Shell's screencast D-Bus API
-- **Segmented Recording**: Records in configurable time segments (default: 30 minutes) to avoid creating overly large video files
-- **Overlapping Recording**: Starts the next recording **before** stopping the current one to eliminate gaps and ensure complete coverage
-- **Seamless Transitions**: The brief pause (default: 1 second) between segments is only for cleanup, not recording - ensuring no data loss
-- **Web Streaming**: Provides real-time screen capture streaming via a built-in HTTP server with Server-Sent Events (SSE)
+## Layout
 
-### Key Features
-1. **Video Recording Options** (via command-line flags):
-   - `-out`: Output directory (defaults to `~/.cache/snoopy/video`)
-   - `-segment`: Duration of each recording segment (default: 30 minutes)
-   - `-pause`: Pause duration between segments (default: 1 second)
-   - `-template`: Filename template for video files (default: `screen-%d-%t.webm`)
-   - `-health-check`: Interval for DBus connection health checks (default: `15s`)
+| Path | What lives there |
+| --- | --- |
+| `server/` | Go module root (`go.mod`, `main.go`, tests, `.golangci.yml`, `snoopy.service`) |
+| `server/main.go` | Flags (top of `realMain`), screencast/D-Bus loop, Avahi advertisement (`txtRecords`), ffmpeg frame extraction, image cache, HTTP handlers (`newHTTPHandler`) |
+| `server/snoopy.service` | systemd **user** unit, installed to `/usr/lib/systemd/user/` |
+| `scripts/` | nfpm post-install / pre-remove scripts |
+| `.goreleaser.yaml` | Release build (`dir: server`): tar.gz, rpm, deb, changelog groups |
+| `mobile/` | Flutter app; platforms: android, ios, macos. Code in `mobile/lib/{models,screens,services,widgets}` |
+| `assets/`, `mobile/assets/` | Images, stored in Git LFS (CI checkouts use `lfs: true`) |
+| `.github/workflows/` | `server.yml`, `mobile.yml` (CI), `release.yml` (tag-driven release) |
+| `renovate.json` | Renovate dependency updates (gomod, pub, gradle, GitHub Actions, Flutter version) |
 
-2. **Web Streaming Options**:
-   - `-addr`: HTTP server bind address (default: `0.0.0.0`)
-   - `-port`: HTTP server port (default: `8900`)
-   - `-image-interval`: Interval between screen captures for web streaming (default: `5s`)
-   - `-image-cache-size`: Maximum number of images to keep in cache (default: `100`)
+## Build and test
 
-3. **Web Interface**:
-   - Access the live screen stream at `http://localhost:8900/`
-   - Real-time updates using Server-Sent Events (SSE)
-   - Clean, responsive HTML interface
-   - No authentication required (intended for local/trusted network use)
+Server (run from `server/`):
 
-4. **Image Cache Management**:
-   - Captures stored in `~/.cache/snoopy/images/*.jpg`
-   - Automatic pruning to maintain cache size limit
-   - Displays a "Waiting for next screen capture" placeholder on initial load
+```bash
+gofmt -l .                 # must print nothing
+go vet ./...
+go test -race -count=1 ./...
+golangci-lint run          # v2 config in server/.golangci.yml
+go run . -version
+```
 
-5. **Error Resilience**:
-   - If a recording fails to start or stop, it logs the error and continues trying after a delay
-   - Periodic DBus connection health checks (every 15 seconds by default) detect session pauses/locks
-   - When DBus connection is lost, the service exits cleanly with error code 1
-   - Prevents processing stale frames from closed video files during session interruptions
+Running the server for real needs a GNOME Shell session on the D-Bus session
+bus; tests must not depend on one. Use `-addr 127.0.0.1` when trying it out.
 
-6. **System Service**:
-   - Includes a systemd service file (`snoopy.service`) to run as a background service
-   - Configured with `Restart=on-failure` to automatically restart when DBus connection is lost
-   - Gracefully recovers from session pause/lock events (screen lock, system suspend, etc.)
-   - Service automatically resumes recording when the user session becomes active again
+Mobile (run from `mobile/`):
 
-### DBus Connection Health Monitoring
+```bash
+flutter pub get
+dart format --set-exit-if-changed .
+flutter analyze --fatal-infos
+flutter test
+flutter build apk --debug
+```
 
-Snoopy includes robust connection monitoring to handle session interruptions gracefully:
+Packages: `goreleaser check` and
+`goreleaser release --snapshot --clean --skip=publish` from the repo root.
 
-**Problem Solved**: Previously, when a user session was paused (screen lock, inactivity timeout, suspend), the DBus connection to GNOME Shell would be lost, but the service would continue running. This caused the ffmpeg frame extraction to process stale frames from closed video files.
+CI mirrors these commands; keep them passing locally before pushing.
 
-**Solution**:
-- **Periodic Health Checks**: Every 15 seconds (configurable), the service pings the DBus connection using `org.freedesktop.DBus.Peer.Ping`
-- **Connection Loss Detection**: If the ping fails, the service immediately detects the lost connection
-- **Clean Shutdown**: The service stops the screencast gracefully and exits with code 1
-- **Automatic Recovery**: systemd's `Restart=on-failure` configuration automatically restarts the service
-- **Fresh Start**: When the session resumes, a new service instance connects to DBus and starts recording fresh
+## Conventions
 
-**Benefits**:
-- ✅ No stale frame processing during session pauses
-- ✅ Automatic recovery when session resumes
-- ✅ Clear logging of connection loss events
-- ✅ Configurable health check interval
-- ✅ Fast detection (within 15 seconds by default)
+- **Conventional Commits.** GoReleaser groups the changelog by prefix:
+  `feat:` (Features), `fix:` (Bug Fixes), `sec:` (Security Updates), `perf:`
+  (Performance Improvements); everything else lands in Others. `docs:`,
+  `test:`, `ci:` and `chore:` commits are excluded from release notes.
+- **Docs follow code.** When you add or change a flag, endpoint, mDNS TXT
+  record, file location or package contents, update `README.md` in the same
+  change (flag table, API table, install steps).
+- **Segment rotation** (`recordLoop`/`rotate` in `server/main.go`): GNOME
+  Shell refuses a second screencast from the same D-Bus client, so the server
+  holds two session-bus connections and starts the next segment on the idle
+  one before stopping the current one (overlap, no gap). If that start fails
+  it falls back to stop, `-pause`, start on the same connection. The loop is
+  tested through the `screencaster` interface with fakes; keep it that way
+  rather than requiring a live GNOME session.
+- **Exit codes**: `realMain` returns 0 on SIGINT/SIGTERM, 1 on errors
+  (including D-Bus loss, after stopping the screencast and withdrawing the
+  Avahi record via deferred cleanup) and 2 on invalid flags. Do not call
+  `os.Exit` or `log.Fatal` inside `run`; it would skip the cleanup.
+  `Restart=on-failure` in the user unit relies on the status-1 exit.
+- **systemd unit**: `WantedBy=graphical-session.target` with `PartOf=` and
+  `After=` on the same target, so it only runs in graphical sessions. Do not
+  switch back to `default.target` (SSH/TTY logins would restart-loop).
+- **Version**: injected at link time (`-X main.version=...`, plus `commit`
+  and `date`); `snoopy -version` prints it and the same value is advertised
+  in the mDNS TXT record `ver=`. Clients must treat `ver` as informational
+  and not compare it to a fixed value.
+- Dependencies are updated by Renovate; do not add Dependabot config.
 
-### Technical Details
-- Written in Go
-- Uses D-Bus to communicate with GNOME Shell's Screencast interface for video recording
-- Implements periodic DBus health checks via `org.freedesktop.DBus.Peer.Ping`
-- Extracts frames from recorded video files (MP4/WebM) using ffmpeg for web streaming
-- Outputs video files in MP4 or WebM format (GNOME Shell configurable)
-- Web streaming uses JPEG format for real-time compatibility
-- Built-in HTTP server with SSE support for real-time streaming
-- Advertises via Avahi with TXT records including `path=/` and `sse=/sse/image`
-- Designed to run as a user session service on Linux systems with GNOME
-- Exits with non-zero code on DBus connection loss for systemd restart
+## Releasing
 
-### Dependencies
-- **Required**: GNOME Shell with Screencast support (for video recording)
-- **Optional**: ffmpeg (for web streaming feature)
-  - If ffmpeg is not available, video recording still works normally
-  - Web interface will display a static "waiting" image
-  - Install ffmpeg to enable live frame streaming: `apt install ffmpeg` or `dnf install ffmpeg`
+A single `vX.Y.Z` tag releases the whole monorepo:
 
-### API Endpoints
-- `GET /`: Main web interface (HTML page with live stream viewer)
-- `GET /sse/image`: Server-Sent Events endpoint for image updates
-- `GET /images/<uuid>.jpg`: Serves cached screenshot images
-- `GET /images/waiting.jpg`: Static placeholder image
+1. `git tag -a vX.Y.Z -m vX.Y.Z && git push origin vX.Y.Z`
+2. `release.yml` runs GoReleaser, which creates the GitHub release with the
+   server artifacts (`release.mode: append`).
+3. The `android` job then builds the APK with `--build-name` from the tag and
+   uploads `snoopy_<version>_android.apk` to the same release. It signs with
+   the `ANDROID_*` secrets when present (see README), otherwise the APK is
+   debug-signed.
 
-This type of tool is useful for security monitoring, creating activity logs, remote monitoring, or capturing long-duration screen activity without manual intervention.
+Pre-1.0, minor versions may change flags and endpoints; call this out in the
+commit message (`feat!:` / `BREAKING CHANGE:`).
