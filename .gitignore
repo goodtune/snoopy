@@ -1,5 +1,6 @@
 # Binary
 /server/snoopy
+/server/snoopy-attest
 
 # GoReleaser output
 dist/

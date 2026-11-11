@@ -4,29 +4,43 @@ version: 2
 # so the project name cannot be inferred.
 project_name: snoopy
 
-# Main build configuration
+# Builds: the recorder (user service) and the attestor (root system service).
+# Both are archived and packaged together (archives and nfpms list both ids).
 builds:
   - id: snoopy
     dir: server
     main: .
     binary: snoopy
-    env:
+    env: &build_env
       - CGO_ENABLED=0
-    flags:
+    flags: &build_flags
       - -trimpath
     mod_timestamp: "{{ .CommitTimestamp }}"
-    ldflags:
+    ldflags: &build_ldflags
       - -s -w
       - -X main.version={{ .Version }}
       - -X main.commit={{ .Commit }}
       - -X main.date={{ .Date }}
-    targets:
+    targets: &build_targets
       - linux_amd64
       - linux_arm64
+
+  - id: snoopy-attest
+    dir: server
+    main: ./cmd/snoopy-attest
+    binary: snoopy-attest
+    env: *build_env
+    flags: *build_flags
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    ldflags: *build_ldflags
+    targets: *build_targets
 
 # Archive configuration for GitHub releases
 archives:
   - id: default
+    ids:
+      - snoopy
+      - snoopy-attest
     formats:
       - tar.gz
     name_template: >-
@@ -44,6 +58,12 @@ archives:
         strip_parent: true
       - src: server/snoopy.conf.example
         strip_parent: true
+      - src: server/snoopy-attest.service
+        strip_parent: true
+      - src: server/attest.conf.example
+        strip_parent: true
+      - src: docs/attestation.md
+        strip_parent: true
       - assets/snoopy-500.jpg
 
 # Linux packages (RPM and Debian)
@@ -52,6 +72,7 @@ nfpms:
     package_name: snoopy
     ids:
       - snoopy
+      - snoopy-attest
     # e.g. snoopy-0.1.0-1.x86_64.rpm and snoopy_0.1.0_amd64.deb
     file_name_template: "{{ .ConventionalFileName }}"
     vendor: GoodTune
@@ -61,6 +82,8 @@ nfpms:
       Snoopy - Continuous screen recording and web-based streaming for GNOME-based Linux systems.
       Provides automated screencast recording in segments by interfacing with GNOME Shell's
       screencast D-Bus API, with real-time web streaming via HTTP Server-Sent Events (SSE).
+      Includes snoopy-attest, an optional root service that attests to a KProxy network
+      proxy that the screen is being recorded (not enabled by default).
     license: MIT
     section: utils
     formats:
@@ -70,11 +93,17 @@ nfpms:
 
     # Package contents
     contents:
-      # Binary (already included by default in bindir)
+      # Binaries snoopy and snoopy-attest (included by default in bindir)
 
-      # Systemd service file
+      # Systemd user unit for the recorder
       - src: server/snoopy.service
         dst: /usr/lib/systemd/user/snoopy.service
+        file_info:
+          mode: 0644
+
+      # Systemd system unit for the attestor (not enabled by the package)
+      - src: server/snoopy-attest.service
+        dst: /usr/lib/systemd/system/snoopy-attest.service
         file_info:
           mode: 0644
 
@@ -88,6 +117,18 @@ nfpms:
       # ~/.config/snoopy/snoopy.conf)
       - src: server/snoopy.conf.example
         dst: /usr/share/doc/snoopy/snoopy.conf.example
+        file_info:
+          mode: 0644
+
+      # Example attestor configuration (copy to /etc/snoopy/attest.conf)
+      - src: server/attest.conf.example
+        dst: /usr/share/doc/snoopy/attest.conf.example
+        file_info:
+          mode: 0644
+
+      # Attestation design and admin guide
+      - src: docs/attestation.md
+        dst: /usr/share/doc/snoopy/attestation.md
         file_info:
           mode: 0644
 
@@ -126,35 +167,12 @@ checksum:
 snapshot:
   version_template: "{{ .Version }}-next"
 
-# Changelog configuration
+# Changelog: disabled. Releases are created with
+#   gh release create vX.Y.Z --generate-notes
+# and GoReleaser (release.mode: append) appends the header below to those
+# notes, so a GoReleaser changelog would duplicate them.
 changelog:
-  sort: asc
-  use: github
-  filters:
-    exclude:
-      - '^docs:'
-      - '^test:'
-      - '^ci:'
-      - '^chore:'
-      - 'merge conflict'
-      - Merge pull request
-      - Merge remote-tracking branch
-      - Merge branch
-  groups:
-    - title: Features
-      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
-      order: 0
-    - title: 'Bug Fixes'
-      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
-      order: 1
-    - title: 'Security Updates'
-      regexp: '^.*?sec(\([[:word:]]+\))??!?:.+$'
-      order: 2
-    - title: 'Performance Improvements'
-      regexp: '^.*?perf(\([[:word:]]+\))??!?:.+$'
-      order: 3
-    - title: Others
-      order: 999
+  disable: true
 
 # GitHub release configuration
 release:
@@ -190,9 +208,10 @@ release:
     ```bash
     wget https://github.com/goodtune/snoopy/releases/download/{{ .Tag }}/snoopy_{{ .Version }}_Linux_x86_64.tar.gz
     tar -xzf snoopy_{{ .Version }}_Linux_x86_64.tar.gz
-    sudo install -m 755 snoopy /usr/bin/
+    sudo install -m 755 snoopy snoopy-attest /usr/bin/
     ```
 
-    ### What's Changed
-  footer: |
-    **Full Changelog**: https://github.com/goodtune/snoopy/compare/{{ .PreviousTag }}...{{ .Tag }}
+    #### Supervised desktops (KProxy attestation)
+    The packages also install `snoopy-attest`, a root system service that
+    vouches to KProxy that the screen is being recorded. It is not enabled
+    automatically; see `/usr/share/doc/snoopy/attestation.md`.

@@ -1,0 +1,81 @@
+# snoopy-attest configuration: copy to /etc/snoopy/attest.conf (root-owned,
+# mode 0644 or 0600). It is read by the system unit snoopy-attest.service
+# (EnvironmentFile=) and directly by `snoopy-attest check`, `pin` and
+# `keygen`, so the commands see the same settings from a root shell.
+# Syntax: KEY=VALUE per line; '#' starts a comment. Empty values mean "use
+# the default". Values shown are the built-in defaults.
+# See /usr/share/doc/snoopy/attestation.md.
+
+# Login name of the supervised user (required). Their GNOME session on seat0
+# is what is attested.
+#SNOOPY_ATTEST_USER=
+
+# Device identifier sent to KProxy and used as the certificate CN by
+# `snoopy-attest keygen` (letters, digits, '.', '-', '_'). Defaults to the
+# hostname.
+#SNOOPY_ATTEST_DEVICE_ID=
+
+# KProxy presence endpoint, e.g. https://kproxy.example.lan:8443/v1/presence.
+# Empty: do not send heartbeats; only evaluate and write state.json.
+#SNOOPY_ATTEST_URL=
+
+# PEM bundle used to verify KProxy's server certificate. Empty: system roots.
+#SNOOPY_ATTEST_CA_FILE=
+
+# Optional SPKI pin of KProxy's certificate (or of a CA in its chain), checked
+# in addition to normal chain validation: sha256:<base64>. Compute it with
+#   openssl x509 -in server.pem -pubkey -noout | openssl pkey -pubin -outform der |
+#   openssl dgst -sha256 -binary | base64
+#SNOOPY_ATTEST_SERVER_PIN=
+
+# Where the device key and certificate live (created by keygen, mode 0700).
+#SNOOPY_ATTEST_STATE_DIR=/var/lib/snoopy-attest
+
+# Where state.json (latest evaluation and heartbeat result) is written.
+#SNOOPY_ATTEST_RUNTIME_DIR=/run/snoopy-attest
+
+# How often the checks run, and how often a heartbeat is sent (a heartbeat is
+# also sent immediately whenever the state changes).
+#SNOOPY_ATTEST_CHECK_INTERVAL=10s
+#SNOOPY_ATTEST_HEARTBEAT_INTERVAL=15s
+
+# EXPERIMENTAL: every FRAME_INTERVAL decode one frame of the newest segment
+# with ffmpeg (6.0 or newer, run as FRAME_USER) and require a plausible,
+# non-uniform screen image of at least 640x480. Two consecutive failures make
+# the state "degraded". Skipped (logged once) if ffmpeg is not installed.
+#SNOOPY_ATTEST_FRAME_CHECK=false
+#SNOOPY_ATTEST_FRAME_INTERVAL=5m
+#SNOOPY_ATTEST_FFMPEG=ffmpeg
+#SNOOPY_ATTEST_FRAME_USER=nobody
+
+# Allow the supervised user to have other sessions (SSH, text console) while
+# the graphical session is attested. Default: such sessions make the state
+# "degraded" (reason extra_session), because they are not recorded.
+#SNOOPY_ATTEST_ALLOW_EXTRA_SESSIONS=false
+
+# --- Advanced: only change these if your distribution differs. ---
+
+# logind seat whose active session is attested.
+#SNOOPY_ATTEST_SEAT=seat0
+
+# The packaged recorder binary, its root-owned managed-mode configuration and
+# the systemd user unit it must run as.
+#SNOOPY_ATTEST_RECORDER_EXE=/usr/bin/snoopy
+#SNOOPY_ATTEST_RECORDER_CONF=/etc/snoopy/snoopy.conf
+#SNOOPY_ATTEST_RECORDER_UNIT=snoopy.service
+
+# GNOME Shell's screencast service: D-Bus activated as
+#   gjs -m /usr/share/gnome-shell/org.gnome.Shell.Screencast
+# Comma-separated list of accepted (root-owned) gjs executables; /usr/bin/gjs
+# is usually a symlink to gjs-console.
+#SNOOPY_ATTEST_GJS_PATHS=/usr/bin/gjs-console,/usr/bin/gjs
+#SNOOPY_ATTEST_SCREENCAST_SCRIPT=/usr/share/gnome-shell/org.gnome.Shell.Screencast
+
+# The newest segment must have been written within this window. GNOME only
+# writes when the screen changes, so keep it generous.
+#SNOOPY_ATTEST_SEGMENT_MAX_AGE=5m
+
+# After the service starts, the session is unlocked or activated, or the
+# machine resumes, a recorder that is not running yet is reported as
+# "degraded" (reason startup_grace) instead of "absent" for this long.
+#SNOOPY_ATTEST_STARTUP_GRACE=30s

@@ -1,8 +1,10 @@
 name: release
 
-# A single vX.Y.Z tag releases the whole monorepo:
-#   1. GoReleaser builds the server and creates the GitHub release
-#      (tar.gz, rpm, deb, checksums).
+# A single vX.Y.Z tag releases the whole monorepo. Create it with
+#   gh release create vX.Y.Z --target main --generate-notes
+# (GitHub writes the release notes), then:
+#   1. GoReleaser builds snoopy and snoopy-attest and appends the tar.gz,
+#      rpm, deb and checksums to that release (release.mode: append).
 #   2. The android job builds the APK and uploads it to that same release.
 
 on:

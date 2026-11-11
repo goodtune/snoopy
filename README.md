@@ -69,8 +69,11 @@ sudo apt install ./snoopy_0.1.0_amd64.deb
 
 The packages install `/usr/bin/snoopy`, the user unit
 `/usr/lib/systemd/user/snoopy.service` and
-`/usr/share/doc/snoopy/snoopy.conf.example`, and recommend `ffmpeg`. They do
-**not** enable the service; that is the administrator's or user's choice. The
+`/usr/share/doc/snoopy/snoopy.conf.example`, and recommend `ffmpeg`. They
+also install the optional [snoopy-attest](#supervised-desktops-snoopy-attest)
+attestor (`/usr/bin/snoopy-attest`, its system unit, `attest.conf.example`
+and `attestation.md` under `/usr/share/doc/snoopy/`). They do
+**not** enable either service; that is the administrator's or user's choice. The
 unit is `WantedBy=` and `PartOf=graphical-session.target`, so once enabled it
 starts and stops with your GNOME session (not on SSH or TTY logins).
 
@@ -120,16 +123,25 @@ settle time after the stop. If the second connection cannot start a
 recording, the server falls back to stop, pause, start on the same
 connection, which leaves a gap of roughly `-pause`.
 
+**Lock, suspend and stalls.** While the screen is locked GNOME Shell ends
+every screencast and refuses new ones. The server follows
+`org.gnome.ScreenSaver.ActiveChanged`, the screencast `Error` signal and
+logind's `PrepareForSleep`: it waits while locked (also at startup) and
+starts a fresh segment as soon as the screen is unlocked or the machine
+resumes, retrying with a short backoff until the shell accepts it. As a
+fallback, a segment file that has not grown for `-stall-timeout` while
+unlocked is restarted (at most once per timeout); a static screen grows
+slowly, so an occasional extra segment on an idle desktop is expected.
+
 ### Exit status and restarts
 
 Exit status is `0` when stopped by SIGINT/SIGTERM (e.g. `systemctl --user
 stop`), `1` on errors including loss of the D-Bus session connection, and `2`
 on invalid flags or `SNOOPY_*` values. The server always stops the active
-screencast and withdraws its mDNS record before exiting. When the session is locked or suspended the D-Bus connection
-to GNOME Shell can drop; a periodic health check
-(`org.freedesktop.DBus.Peer.Ping`) notices, the server exits with status 1,
-and `Restart=on-failure` starts a fresh instance (up to 10 restarts in 5
-minutes) once the session is back.
+screencast and withdraws its mDNS record before exiting. A periodic health
+check (`org.freedesktop.DBus.Peer.Ping`) notices a lost session bus; the
+server then exits with status 1 and `Restart=on-failure` starts a fresh
+instance (up to 10 restarts in 5 minutes).
 
 ## Configuration
 
@@ -138,7 +150,8 @@ name, `-` becoming `_`). Precedence: command-line flag, then environment
 variable, then built-in default; `snoopy -help` shows the effective defaults.
 Empty variables count as unset; an invalid value exits with status 2. The
 service reads optional files `/etc/snoopy/snoopy.conf` (all users), then
-`~/.config/snoopy/snoopy.conf` (your user, overriding); start from
+`~/.config/snoopy/snoopy.conf` (your user, overriding), unless
+[managed mode](#managed-mode) is on; start from
 `/usr/share/doc/snoopy/snoopy.conf.example` and restart the service.
 
 | Flag | Environment variable | Default | Description |
@@ -147,7 +160,8 @@ service reads optional files `/etc/snoopy/snoopy.conf` (all users), then
 | `-segment` | `SNOOPY_SEGMENT` | `30m` | Duration of each recording segment |
 | `-pause` | `SNOOPY_PAUSE` | `1s` | Settle time after stopping the previous segment (see [How recording works](#how-recording-works)) |
 | `-template` | `SNOOPY_TEMPLATE` | `screen-%d-%t.webm` | Filename template passed to GNOME Shell |
-| `-health-check` | `SNOOPY_HEALTH_CHECK` | `15s` | Interval between D-Bus connection health checks |
+| `-health-check` | `SNOOPY_HEALTH_CHECK` | `15s` | Interval between D-Bus connection health checks (and stall checks) |
+| `-stall-timeout` | `SNOOPY_STALL_TIMEOUT` | `5m` | Restart the segment if its file has not grown for this long while unlocked; `0` disables |
 | `-addr` | `SNOOPY_ADDR` | `127.0.0.1` | HTTP bind address; a loopback address (`127.0.0.1`, `::1`, `localhost`) also skips the mDNS advertisement (see [Security](#security)) |
 | `-port` | `SNOOPY_PORT` | `8900` | HTTP port |
 | `-image-interval` | `SNOOPY_IMAGE_INTERVAL` | `5s` | Interval between frames extracted for streaming |
@@ -156,6 +170,66 @@ service reads optional files `/etc/snoopy/snoopy.conf` (all users), then
 
 Recorded segments are never deleted by Snoopy; prune `~/.cache/snoopy/video`
 yourself (for example with a systemd timer or `find -mtime`).
+
+### Managed mode
+
+On a supervised desktop the per-user file and flags would let the user
+override the administrator. `SNOOPY_MANAGED=1` in `/etc/snoopy/snoopy.conf`
+makes that file final: Snoopy reads it itself and uses only its `SNOOPY_*`
+keys plus built-in defaults, ignoring `~/.config/snoopy/snoopy.conf`, other
+`SNOOPY_*` variables and flags (it logs the names it ignored). The file must
+be owned by root and not group- or world-writable, or Snoopy warns and runs
+unmanaged; invalid values exit with status 2.
+
+```bash
+printf 'SNOOPY_MANAGED=1\nSNOOPY_OUT=/srv/snoopy/alice\n' | sudo tee /etc/snoopy/snoopy.conf
+sudo chown root:root /etc/snoopy/snoopy.conf && sudo chmod 0644 /etc/snoopy/snoopy.conf
+```
+
+`SNOOPY_MANAGED` accepts `1`, `true` or `yes` (any case) to turn it on and
+`0`, `false`, `no` or empty to leave it off; any other value exits with
+status 2.
+
+Managed mode cannot stop a user from stopping or overriding the user unit;
+pair it with the root `snoopy-attest` service (see
+[Supervised desktops: snoopy-attest](#supervised-desktops-snoopy-attest)),
+which checks that recording is happening to the configured location.
+
+## Supervised desktops: snoopy-attest
+
+`snoopy-attest` is an optional root system service for supervised desktops.
+From outside the user session (logind, `/proc`, the filesystem) it verifies
+that the packaged recorder `/usr/bin/snoopy` is running in
+[managed mode](#managed-mode) as the user's `snoopy.service`, and that GNOME's
+screencast service is writing the newest segment in the expected output
+directory (`SNOOPY_OUT` from `/etc/snoopy/snoopy.conf`, else
+`~/.cache/snoopy/video`). It then reports a state (`recording`, `locked`,
+`no_session`, `degraded`, `absent`) over mutually authenticated TLS to a
+KProxy presence endpoint, which can allow or block the desktop's traffic.
+
+> [!NOTE]
+> The KProxy side is not implemented yet (tracked in the KProxy repository).
+> Today the attestor is useful for monitoring with `snoopy-attest check` and
+> `/run/snoopy-attest/state.json`, and for enrolling devices ahead of
+> enforcement.
+
+| Path | What it is |
+| --- | --- |
+| `/usr/bin/snoopy-attest` | The attestor binary |
+| `/usr/lib/systemd/system/snoopy-attest.service` | System unit, installed but **not enabled** by the package |
+| `/etc/snoopy/attest.conf` | Configuration you create from `/usr/share/doc/snoopy/attest.conf.example` |
+| `/var/lib/snoopy-attest/` | Device key and certificate (root only) |
+| `/run/snoopy-attest/state.json` | Latest evaluation and heartbeat result (world-readable) |
+
+Commands (as root): `snoopy-attest keygen` creates the device key and
+self-signed certificate, `snoopy-attest pin` prints its SPKI pin to register
+in KProxy, and `snoopy-attest check` runs every check once and prints the
+state (exit status 0 means `recording`). After a package upgrade the user's
+running recorder is still the old, deleted binary, so the state is `absent`
+(`exe_mismatch`) until snoopy restarts (`systemctl --user restart
+snoopy.service` or a new login). See [docs/attestation.md](docs/attestation.md)
+for the threat model and its limits, the checks, the heartbeat protocol and
+the setup runbook.
 
 ## Web interface and API
 
@@ -215,6 +289,8 @@ Repository layout:
 
 ```
 server/     Go server (module root: go.mod, main.go, snoopy.service)
+            and the attestor (cmd/snoopy-attest, internal/attest)
+docs/       attestation.md (snoopy-attest design and runbook, packaged)
 mobile/     Flutter app (android, ios, macos)
 scripts/    Package install/remove scripts used by GoReleaser
 assets/     Logo and shared images (Git LFS)
@@ -256,17 +332,11 @@ Snoopy is pre-1.0: flags, endpoints and app behaviour may change between minor
 versions.
 
 1. Use [Conventional Commits](https://www.conventionalcommits.org/)
-   (`feat:`, `fix:`, `sec:`, `perf:`); they become the release notes.
-2. Tag and push from `main`:
-
-   ```bash
-   git tag -a v0.1.0 -m "v0.1.0"
-   git push origin v0.1.0
-   ```
-
-3. The `release` workflow runs GoReleaser to create the GitHub release (server
-   tarballs, rpm, deb, checksums), then builds the Android APK and attaches it
-   to the same release.
+   (`feat:`, `fix:`, `sec:`, `perf:`); release notes are generated from them.
+2. Create the release from `main` (this creates the tag and triggers the
+   `release` workflow): `gh release create v0.1.0 --target main --generate-notes`
+3. GoReleaser appends the server tarballs, rpm, deb, checksums and install
+   instructions to that release, then the Android APK is attached to it.
 
 To sign the APK with a release key, set these repository secrets (otherwise
 the APK is debug-signed and suitable only for sideloading):

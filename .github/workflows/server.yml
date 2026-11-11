@@ -6,6 +6,7 @@ on:
       - "server/**"
       - ".goreleaser.yaml"
       - "scripts/**"
+      - "docs/**"
       - ".github/workflows/server.yml"
   push:
     branches: [main]
@@ -13,6 +14,7 @@ on:
       - "server/**"
       - ".goreleaser.yaml"
       - "scripts/**"
+      - "docs/**"
       - ".github/workflows/server.yml"
   workflow_dispatch:
 
