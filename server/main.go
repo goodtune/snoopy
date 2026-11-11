@@ -19,7 +19,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -417,54 +416,34 @@ func main() {
 	os.Exit(realMain())
 }
 
-// realMain parses flags, runs the service and returns the process exit code.
-// Keeping os.Exit out of run lets deferred cleanup (stopping the screencast,
-// closing DBus connections, withdrawing the Avahi record) always execute.
+// realMain resolves the configuration, runs the service and returns the
+// process exit code. Keeping os.Exit out of run lets deferred cleanup
+// (stopping the screencast, closing DBus connections, withdrawing the Avahi
+// record) always execute.
 func realMain() int {
-	// Each flag's default comes from its SNOOPY_* environment variable when
-	// set, so the systemd unit can be configured through EnvironmentFile= and
-	// -help shows the effective default. An explicit flag still wins.
-	env := newEnvDefaults(os.LookupEnv)
-	var (
-		outDir              = flag.String("out", env.string("out", ""), usage("out", "Output directory (empty: ~/.cache/snoopy/video)"))
-		segment             = flag.Duration("segment", env.duration("segment", 30*time.Minute), usage("segment", "Segment duration"))
-		pause               = flag.Duration("pause", env.duration("pause", 1*time.Second), usage("pause", "Pause between segments"))
-		fileTemplate        = flag.String("template", env.string("template", "screen-%d-%t.webm"), usage("template", "Filename template used by GNOME Shell"))
-		addr                = flag.String("addr", env.string("addr", "127.0.0.1"), usage("addr", "HTTP server bind address (0.0.0.0 exposes it on the LAN)"))
-		port                = flag.Int("port", env.int("port", 8900), usage("port", "HTTP server port"))
-		imageInterval       = flag.Duration("image-interval", env.duration("image-interval", 5*time.Second), usage("image-interval", "Interval between screen captures for web streaming"))
-		imageCacheSize      = flag.Int("image-cache-size", env.int("image-cache-size", 100), usage("image-cache-size", "Maximum number of images to keep in cache"))
-		healthCheckInterval = flag.Duration("health-check", env.duration("health-check", 15*time.Second), usage("health-check", "Interval for DBus connection health checks"))
-		showVersion         = flag.Bool("version", false, "Print version information and exit")
-	)
-	flag.Parse()
-
-	if *showVersion {
+	res, err := resolveConfig(loadManagedFile(managedConfigPath), os.LookupEnv, os.Args[1:], os.Stderr)
+	if errors.Is(err, flag.ErrHelp) {
+		return 0
+	}
+	if err != nil {
+		log.Printf("%v", err)
+		return 2
+	}
+	if res.showVersion {
 		fmt.Printf("snoopy %s (commit %s, built %s)\n", buildVersion(), commit, date)
 		return 0
 	}
-
-	if err := env.err(); err != nil {
-		log.Printf("invalid environment: %v", err)
-		return 2
+	for _, w := range res.warnings {
+		log.Printf("WARNING: %s", w)
+	}
+	if res.managed {
+		log.Printf("Managed mode: configuration from %s only (environment and flags ignored)", managedConfigPath)
+		if len(res.ignored) > 0 {
+			log.Printf("Managed mode: ignored user-supplied settings: %s", strings.Join(res.ignored, ", "))
+		}
 	}
 
-	if *segment <= 0 || *healthCheckInterval <= 0 || *imageInterval <= 0 || *pause < 0 {
-		log.Printf("-segment, -health-check and -image-interval must be positive and -pause must not be negative")
-		return 2
-	}
-
-	err := run(options{
-		outDir:         *outDir,
-		segment:        *segment,
-		pause:          *pause,
-		fileTemplate:   *fileTemplate,
-		addr:           *addr,
-		port:           *port,
-		imageInterval:  *imageInterval,
-		imageCacheSize: *imageCacheSize,
-		healthCheck:    *healthCheckInterval,
-	})
+	err = run(res.opts)
 	if err != nil {
 		log.Printf("ERROR: %v", err)
 		if errors.Is(err, errConnectionLost) {
@@ -473,86 +452,6 @@ func realMain() int {
 		return 1
 	}
 	return 0
-}
-
-// envPrefix is prepended to a flag's name (upper-cased, "-" replaced by "_")
-// to form the environment variable that supplies its default.
-const envPrefix = "SNOOPY_"
-
-// envName returns the environment variable for flag name, e.g.
-// "image-interval" -> "SNOOPY_IMAGE_INTERVAL".
-func envName(name string) string {
-	return envPrefix + strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
-}
-
-// usage appends the flag's environment variable to its help text.
-func usage(name, text string) string {
-	return fmt.Sprintf("%s (env %s)", text, envName(name))
-}
-
-// envDefaults computes flag defaults from the environment, falling back to
-// the built-in default when the variable is unset or empty. Parse errors are
-// collected and reported together by err, so the caller can exit with the
-// invalid-flag status.
-type envDefaults struct {
-	lookup func(string) (string, bool)
-	errs   []error
-}
-
-func newEnvDefaults(lookup func(string) (string, bool)) *envDefaults {
-	return &envDefaults{lookup: lookup}
-}
-
-func (e *envDefaults) value(name string) (string, string, bool) {
-	key := envName(name)
-	v, ok := e.lookup(key)
-	v = strings.TrimSpace(v)
-	return key, v, ok && v != ""
-}
-
-func (e *envDefaults) string(name, def string) string {
-	if _, v, ok := e.value(name); ok {
-		return v
-	}
-	return def
-}
-
-func (e *envDefaults) duration(name string, def time.Duration) time.Duration {
-	key, v, ok := e.value(name)
-	if !ok {
-		return def
-	}
-	d, err := time.ParseDuration(v)
-	if err != nil {
-		e.errs = append(e.errs, fmt.Errorf("%s=%q: not a duration (e.g. 30s, 5m, 1h)", key, v))
-		return def
-	}
-	return d
-}
-
-func (e *envDefaults) int(name string, def int) int {
-	key, v, ok := e.value(name)
-	if !ok {
-		return def
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		e.errs = append(e.errs, fmt.Errorf("%s=%q: not an integer", key, v))
-		return def
-	}
-	return n
-}
-
-// err reports every invalid variable on a single line, or nil.
-func (e *envDefaults) err() error {
-	if len(e.errs) == 0 {
-		return nil
-	}
-	msgs := make([]string, len(e.errs))
-	for i, err := range e.errs {
-		msgs[i] = err.Error()
-	}
-	return errors.New(strings.Join(msgs, "; "))
 }
 
 // shouldAdvertise reports whether the server should be announced over mDNS
@@ -579,6 +478,7 @@ type options struct {
 	imageInterval  time.Duration
 	imageCacheSize int
 	healthCheck    time.Duration
+	stallTimeout   time.Duration
 }
 
 func run(o options) error {
@@ -668,13 +568,28 @@ func run(o options) error {
 	log.Printf("Starting screencast loop: out=%s segment=%s", o.outDir, o.segment)
 	log.Printf("HTTP server running on http://%s:%d", o.addr, o.port)
 	log.Printf("DBus health check enabled: interval=%s", o.healthCheck)
+	if o.stallTimeout > 0 {
+		log.Printf("Stall detection enabled: timeout=%s", o.stallTimeout)
+	}
+
+	// Lock/unlock, resume and screencast-error notifications let recording
+	// resume as soon as the shell allows it. Without them the loop still
+	// recovers through stall detection and the segment timer.
+	var events sessionEvents
+	if ev, err := newDBusSessionEvents(ctx); err != nil {
+		log.Printf("Warning: session events unavailable, relying on stall detection: %v", err)
+	} else {
+		events = ev
+	}
 
 	err = recordLoop(ctx, loopConfig{
-		template:    filepath.Join(o.outDir, o.fileTemplate),
-		segment:     o.segment,
-		pause:       o.pause,
-		healthCheck: o.healthCheck,
-		retryDelay:  5 * time.Second,
+		template:     filepath.Join(o.outDir, o.fileTemplate),
+		segment:      o.segment,
+		pause:        o.pause,
+		healthCheck:  o.healthCheck,
+		retryDelay:   5 * time.Second,
+		stallTimeout: o.stallTimeout,
+		events:       events,
 	}, newDBusScreencaster(connA), newDBusScreencaster(connB))
 	if err != nil {
 		return err
@@ -684,196 +599,6 @@ func run(o options) error {
 	}
 	log.Printf("Shutdown complete")
 	return nil
-}
-
-// errConnectionLost is returned when the session bus goes away (for example
-// when the session is locked or suspended); systemd restarts the service.
-var errConnectionLost = errors.New("DBus session connection lost")
-
-// screencaster is one GNOME Shell screencast client (one DBus connection).
-type screencaster interface {
-	// Start begins a recording using the GNOME Shell filename template and
-	// returns the file being written.
-	Start(template string) (string, error)
-	// Stop ends this client's recording.
-	Stop() error
-	// Ping checks that the underlying DBus connection is alive.
-	Ping() error
-}
-
-const dbusCallTimeout = 10 * time.Second
-
-type dbusScreencaster struct {
-	conn *dbus.Conn
-	obj  dbus.BusObject
-}
-
-func newDBusScreencaster(conn *dbus.Conn) *dbusScreencaster {
-	return &dbusScreencaster{conn: conn, obj: conn.Object(dest, dbus.ObjectPath(objPath))}
-}
-
-func (d *dbusScreencaster) Start(template string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), dbusCallTimeout)
-	defer cancel()
-	var (
-		ok   bool
-		file string
-	)
-	err := d.obj.CallWithContext(ctx, startMethod, 0, template, map[string]dbus.Variant{}).Store(&ok, &file)
-	if err != nil {
-		return "", err
-	}
-	if !ok {
-		return "", errors.New("GNOME Shell refused to start screencast")
-	}
-	return file, nil
-}
-
-func (d *dbusScreencaster) Stop() error {
-	ctx, cancel := context.WithTimeout(context.Background(), dbusCallTimeout)
-	defer cancel()
-	return d.obj.CallWithContext(ctx, stopMethod, 0).Err
-}
-
-func (d *dbusScreencaster) Ping() error {
-	return checkDBusConnection(d.conn)
-}
-
-type loopConfig struct {
-	template    string
-	segment     time.Duration // length of each recording segment
-	pause       time.Duration // settle time after stopping the previous segment
-	healthCheck time.Duration // DBus ping interval
-	retryDelay  time.Duration // wait before retrying after a failed start
-}
-
-// recordLoop records consecutive segments, alternating between the two
-// screencasters, until ctx is cancelled (returns nil) or the DBus connection
-// is lost (returns an error wrapping errConnectionLost). The active recording
-// is always stopped before it returns.
-func recordLoop(ctx context.Context, cfg loopConfig, a, b screencaster) error {
-	file, err := a.Start(cfg.template)
-	if err != nil {
-		return fmt.Errorf("start initial screencast: %w", err)
-	}
-	log.Printf("Started initial recording: %s", file)
-
-	active, spare := a, b
-	defer func() {
-		if active == nil {
-			return
-		}
-		if err := active.Stop(); err != nil {
-			log.Printf("Stop screencast on exit failed: %v", err)
-		}
-	}()
-
-	ping := func() error {
-		for _, sc := range []screencaster{a, b} {
-			if err := sc.Ping(); err != nil {
-				return fmt.Errorf("%w: %v", errConnectionLost, err)
-			}
-		}
-		return nil
-	}
-
-	healthCheckTicker := time.NewTicker(cfg.healthCheck)
-	defer healthCheckTicker.Stop()
-
-	// The segment timer is created once and re-armed after each rotation; it
-	// must not be recreated per select iteration, or every health-check tick
-	// would restart the segment countdown.
-	segmentTimer := time.NewTimer(cfg.segment)
-	defer segmentTimer.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			log.Printf("Received shutdown signal, cleaning up...")
-			return nil
-
-		case <-healthCheckTicker.C:
-			if err := ping(); err != nil {
-				log.Printf("DBus session connection lost (likely due to session pause/lock)")
-				return err
-			}
-
-		case <-segmentTimer.C:
-			if active == nil {
-				// A previous rotation left nothing recording; try again.
-				file, err := a.Start(cfg.template)
-				if err != nil {
-					log.Printf("Restart screencast failed: %v", err)
-					if perr := ping(); perr != nil {
-						return perr
-					}
-					segmentTimer.Reset(cfg.retryDelay)
-					continue
-				}
-				log.Printf("Restarted recording: %s", file)
-				active, spare = a, b
-				segmentTimer.Reset(cfg.segment)
-				continue
-			}
-
-			next, err := rotate(ctx, active, spare, cfg.template, cfg.pause)
-			if err != nil {
-				log.Printf("Segment rotation failed, no recording active: %v", err)
-				if perr := ping(); perr != nil {
-					log.Printf("DBus connection lost during segment rotation")
-					return perr
-				}
-				active = nil
-				segmentTimer.Reset(cfg.retryDelay)
-				continue
-			}
-			if next != active {
-				active, spare = next, active
-			}
-			segmentTimer.Reset(cfg.segment)
-		}
-	}
-}
-
-// rotate starts the next segment on spare BEFORE stopping cur so coverage
-// overlaps, then pauses briefly for cleanup. If spare cannot start, it falls
-// back to stopping cur and restarting on it (a gap of roughly pause). It
-// returns the screencaster now recording, or an error if none is.
-func rotate(ctx context.Context, cur, spare screencaster, template string, pause time.Duration) (screencaster, error) {
-	file, err := spare.Start(template)
-	if err == nil {
-		log.Printf("Started next recording: %s", file)
-		if err := cur.Stop(); err != nil {
-			log.Printf("Stop previous screencast failed (may already be stopped): %v", err)
-		}
-		sleepCtx(ctx, pause)
-		return spare, nil
-	}
-	log.Printf("Start next screencast failed, falling back to stop/start: %v", err)
-
-	if err := cur.Stop(); err != nil {
-		log.Printf("Stop screencast failed: %v", err)
-	}
-	sleepCtx(ctx, pause)
-	file, err = cur.Start(template)
-	if err != nil {
-		return nil, err
-	}
-	log.Printf("Started next recording: %s", file)
-	return cur, nil
-}
-
-// sleepCtx sleeps for d or until ctx is done.
-func sleepCtx(ctx context.Context, d time.Duration) {
-	if d <= 0 {
-		return
-	}
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-	case <-t.C:
-	}
 }
 
 func startScreenCaptureLoop(cache *ImageCache, broadcaster *SSEBroadcaster, interval time.Duration, videoDir string) {

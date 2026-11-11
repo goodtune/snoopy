@@ -1,0 +1,78 @@
+[Unit]
+Description=Snoopy attestation - vouch to KProxy that the screen is being recorded
+Documentation=file:/usr/share/doc/snoopy/attestation.md https://github.com/goodtune/snoopy
+# Inspects the supervised user's session from outside (logind on the system
+# bus, /proc) and reports its state to KProxy. Not enabled by the package:
+#   sudo systemctl enable --now snoopy-attest.service
+After=network-online.target systemd-logind.service dbus.service
+Wants=network-online.target
+# Never give up: while this service is down KProxy stops receiving
+# heartbeats and blocks the device, so keep trying.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# SNOOPY_ATTEST_* settings (see /usr/share/doc/snoopy/attest.conf.example).
+# The binary also reads this file itself, so `snoopy-attest check` run from a
+# root shell sees the same settings.
+EnvironmentFile=-/etc/snoopy/attest.conf
+ExecStart=/usr/bin/snoopy-attest run
+Restart=always
+RestartSec=5
+
+# /var/lib/snoopy-attest holds the device key (key.pem, 0600); state.json in
+# /run/snoopy-attest is world-readable for monitoring.
+StateDirectory=snoopy-attest
+StateDirectoryMode=0700
+RuntimeDirectory=snoopy-attest
+RuntimeDirectoryMode=0755
+UMask=0077
+
+# --- Privileges ---
+# Runs as root, but only with the capabilities it needs:
+#  CAP_SYS_PTRACE      /proc/<pid>/exe, environ, fd/N and fdinfo/N of another
+#                      uid's process require ptrace read access
+#                      (PTRACE_MODE_READ_FSCREDS); root passes that check
+#                      only with CAP_SYS_PTRACE. Yama's ptrace_scope only
+#                      restricts attaching, not these reads.
+#  CAP_DAC_READ_SEARCH the user's /proc/<pid>/fd directory is mode 0500 owned
+#                      by them, and their home (0700 on Fedora) must be
+#                      traversed to read ~/.cache/snoopy/video and open the
+#                      newest segment; read and search only, no write.
+#  CAP_SETUID/SETGID   the experimental frame check starts ffmpeg as
+#                      SNOOPY_ATTEST_FRAME_USER (nobody); unused otherwise.
+# No CAP_DAC_OVERRIDE: everything it writes is its own (root-owned) state.
+CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_SETUID CAP_SETGID
+AmbientCapabilities=
+NoNewPrivileges=yes
+
+# --- Sandbox ---
+# /proc must show every process with full detail: keep ProtectProc=default
+# and ProcSubset=all (the defaults); do not set ProtectProc=invisible or
+# PrivateUsers=, which would hide the user's processes or make capabilities
+# useless across uids.
+ProtectSystem=strict
+# Read-only access to /home so the output directory can be inspected.
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# Go needs no W+X memory; if the experimental frame check's ffmpeg crashes on
+# your system, try removing this line.
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target
