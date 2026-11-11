@@ -6,8 +6,8 @@ Documentation=https://github.com/goodtune/snoopy
 # not on the session bus, causing a restart loop.
 PartOf=graphical-session.target
 After=graphical-session.target
-# Allow up to 10 restarts in 5 minutes so a locked or suspended session does
-# not permanently trip the start limit.
+# Allow up to 10 restarts in 5 minutes so a flapping session bus does not
+# permanently trip the start limit.
 StartLimitIntervalSec=300
 StartLimitBurst=10
 
@@ -15,14 +15,19 @@ StartLimitBurst=10
 Type=simple
 # Optional SNOOPY_* settings (see /usr/share/doc/snoopy/snoopy.conf.example);
 # the per-user file is read last, so it overrides the system-wide one.
+# Managed mode: if /etc/snoopy/snoopy.conf sets SNOOPY_MANAGED=1 and is owned
+# by root and not group- or world-writable, snoopy reads that file itself and
+# ignores the environment (including the per-user file) and any flags. Both
+# lines stay so unmanaged desktops can still use the per-user file.
 # Snoopy binds 127.0.0.1 by default. To expose it on the LAN (and advertise it
-# over mDNS for the mobile app), as your user:
+# over mDNS for the mobile app), as your user (unmanaged only):
 #   mkdir -p ~/.config/snoopy && echo 'SNOOPY_ADDR=0.0.0.0' >> ~/.config/snoopy/snoopy.conf && systemctl --user restart snoopy.service
 EnvironmentFile=-/etc/snoopy/snoopy.conf
 EnvironmentFile=-%h/.config/snoopy/snoopy.conf
 ExecStart=/usr/bin/snoopy
-# Restart on failure (non-zero exit code) such as when DBus connection is lost
-# This allows the service to recover from session pause/lock events
+# Restart on failure (non-zero exit code), such as when the DBus session
+# connection is lost. Screen lock/unlock and suspend/resume are handled in
+# process (recording resumes on unlock) and do not need a restart.
 Restart=on-failure
 RestartSec=10
 

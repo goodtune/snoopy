@@ -250,7 +250,8 @@ type fakeScreencaster struct {
 	mu        sync.Mutex
 	name      string
 	recording bool
-	starts    int
+	starts    int // successful starts
+	attempts  int // all Start calls
 	stops     int
 	startErr  error
 	pingErr   error
@@ -267,6 +268,7 @@ func (f *fakeScreencaster) event(s string) {
 func (f *fakeScreencaster) Start(string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.attempts++
 	if f.startErr != nil {
 		return "", f.startErr
 	}
@@ -304,6 +306,20 @@ func (f *fakeScreencaster) setStartErr(err error) {
 	f.mu.Lock()
 	f.startErr = err
 	f.mu.Unlock()
+}
+
+// kill ends the recording the way GNOME Shell does on lock: no Stop call.
+func (f *fakeScreencaster) kill() {
+	f.mu.Lock()
+	f.recording = false
+	f.event("killed")
+	f.mu.Unlock()
+}
+
+func (f *fakeScreencaster) startAttempts() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.attempts
 }
 
 func (f *fakeScreencaster) counts() (starts, stops int, recording bool) {
@@ -409,9 +425,9 @@ func TestRotate(t *testing.T) {
 	t.Run("overlap via spare", func(t *testing.T) {
 		a, b, events := newFakePair()
 		_, _ = a.Start("")
-		got, err := rotate(context.Background(), a, b, "", 0)
-		if err != nil || got != b {
-			t.Fatalf("rotate = %v, %v; want b, nil", got, err)
+		got, file, err := rotate(context.Background(), a, b, "", 0)
+		if err != nil || got != b || file != "b.webm" {
+			t.Fatalf("rotate = %v, %q, %v; want b, b.webm, nil", got, file, err)
 		}
 		if ev := events(); strings.Join(ev, ",") != "a:start,b:start,a:stop" {
 			t.Errorf("events = %v", ev)
@@ -422,9 +438,9 @@ func TestRotate(t *testing.T) {
 		a, b, events := newFakePair()
 		_, _ = a.Start("")
 		b.setStartErr(errors.New("nope"))
-		got, err := rotate(context.Background(), a, b, "", 0)
-		if err != nil || got != a {
-			t.Fatalf("rotate = %v, %v; want a, nil", got, err)
+		got, file, err := rotate(context.Background(), a, b, "", 0)
+		if err != nil || got != a || file != "a.webm" {
+			t.Fatalf("rotate = %v, %q, %v; want a, a.webm, nil", got, file, err)
 		}
 		if ev := events(); strings.Join(ev, ",") != "a:start,a:stop,a:start" {
 			t.Errorf("events = %v", ev)
@@ -436,7 +452,7 @@ func TestRotate(t *testing.T) {
 		_, _ = a.Start("")
 		b.setStartErr(errors.New("nope"))
 		a.setStartErr(errors.New("nope"))
-		if got, err := rotate(context.Background(), a, b, "", 0); err == nil || got != nil {
+		if got, _, err := rotate(context.Background(), a, b, "", 0); err == nil || got != nil {
 			t.Fatalf("rotate = %v, %v; want nil, error", got, err)
 		}
 	})
