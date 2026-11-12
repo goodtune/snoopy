@@ -116,17 +116,47 @@ func (b *SSEBroadcaster) broadcast(msg string) {
 	}
 }
 
-// AvahiService manages the Avahi mDNS service advertisement
+// mdnsService is one DNS-SD service in snoopy's Avahi entry group.
+type mdnsService struct {
+	typ  string // e.g. "_snoopy._tcp"
+	port int
+	txt  [][]byte
+}
+
+// advertisedServices decides what to announce over mDNS. _snoopy._tcp is
+// announced when the HTTP server is reachable from other machines
+// (shouldAdvertise), _rtsp._tcp when the RTSP server is running on a
+// non-loopback address; the snoopy record then also names the RTSP port.
+// An empty result means Avahi is not used at all.
+func advertisedServices(ver, httpAddr string, httpPort int, rtspRunning bool, rtspAddr string, rtspPort int) []mdnsService {
+	rtspAdvertised := rtspRunning && shouldAdvertise(rtspAddr)
+	var services []mdnsService
+	if shouldAdvertise(httpAddr) {
+		port := 0
+		if rtspAdvertised {
+			port = rtspPort
+		}
+		services = append(services, mdnsService{"_snoopy._tcp", httpPort, txtRecords(ver, port)})
+	}
+	if rtspAdvertised {
+		services = append(services, mdnsService{"_rtsp._tcp", rtspPort, rtspTXTRecords()})
+	}
+	return services
+}
+
+// AvahiService manages the Avahi mDNS service advertisement. All services
+// share one entry group and one name, so a name collision renames them
+// together.
 type AvahiService struct {
 	conn        *dbus.Conn
 	entryGroup  dbus.ObjectPath
 	baseName    string
 	serviceName string
-	port        int
+	services    []mdnsService
 }
 
-// newAvahiService creates and advertises a new Avahi service
-func newAvahiService(port int) (*AvahiService, error) {
+// newAvahiService creates and advertises the given services.
+func newAvahiService(services []mdnsService) (*AvahiService, error) {
 	// Connect to system bus
 	conn, err := dbus.ConnectSystemBus()
 	if err != nil {
@@ -139,12 +169,10 @@ func newAvahiService(port int) (*AvahiService, error) {
 		username = "unknown"
 	}
 
-	baseName := username
-
 	as := &AvahiService{
 		conn:     conn,
-		baseName: baseName,
-		port:     port,
+		baseName: username,
+		services: services,
 	}
 
 	// Create and advertise the service
@@ -156,7 +184,7 @@ func newAvahiService(port int) (*AvahiService, error) {
 	return as, nil
 }
 
-// advertise creates an EntryGroup and advertises the service
+// advertise creates an EntryGroup and advertises the services
 func (as *AvahiService) advertise() error {
 	// Try to register with just the username first
 	err := as.tryAdvertise(as.baseName)
@@ -178,11 +206,16 @@ func (as *AvahiService) advertise() error {
 		}
 	}
 
-	log.Printf("Avahi: advertising service '%s' on port %d", as.serviceName, as.port)
+	var list []string
+	for _, svc := range as.services {
+		list = append(list, fmt.Sprintf("%s on port %d", svc.typ, svc.port))
+	}
+	log.Printf("Avahi: advertising '%s' as %s", as.serviceName, strings.Join(list, ", "))
 	return nil
 }
 
-// tryAdvertise attempts to register the service with the given name
+// tryAdvertise attempts to register every service under the given name in
+// a single entry group.
 func (as *AvahiService) tryAdvertise(name string) error {
 	server := as.conn.Object(avahiDest, dbus.ObjectPath(avahiServerPath))
 
@@ -192,53 +225,49 @@ func (as *AvahiService) tryAdvertise(name string) error {
 	if err != nil {
 		return fmt.Errorf("create entry group: %w", err)
 	}
-	as.entryGroup = entryGroupPath
-
-	// Set the service name
-	as.serviceName = name
-
-	// Prepare TXT records
-	txtRecords := as.prepareTXTRecords()
-
-	// Add service to entry group
 	entryGroup := as.conn.Object(avahiDest, entryGroupPath)
-	err = entryGroup.Call(
-		avahiEntryGroupIface+".AddService",
-		0,
-		avahiIfaceUnspec, // interface (-1 = all)
-		avahiProtoUnspec, // protocol (-1 = all)
-		uint32(0),        // flags
-		as.serviceName,
-		"_snoopy._tcp",
-		"",              // domain (empty = default "local")
-		"",              // host (empty = default hostname)
-		uint16(as.port), // port
-		txtRecords,
-	).Err
-	if err != nil {
-		return fmt.Errorf("add service: %w", err)
+	discard := func() {
+		if resetErr := entryGroup.Call(avahiEntryGroupIface+".Reset", 0).Err; resetErr != nil {
+			log.Printf("Avahi: warning - failed to reset entry group: %v", resetErr)
+		}
+		entryGroup.Call(avahiEntryGroupIface+".Free", 0)
+	}
+
+	for _, svc := range as.services {
+		err = entryGroup.Call(
+			avahiEntryGroupIface+".AddService",
+			0,
+			avahiIfaceUnspec, // interface (-1 = all)
+			avahiProtoUnspec, // protocol (-1 = all)
+			uint32(0),        // flags
+			name,
+			svc.typ,
+			"",               // domain (empty = default "local")
+			"",               // host (empty = default hostname)
+			uint16(svc.port), //nolint:gosec // ports are validated to 1-65535
+			svc.txt,
+		).Err
+		if err != nil {
+			discard()
+			return fmt.Errorf("add service %s: %w", svc.typ, err)
+		}
 	}
 
 	// Commit the entry group
 	err = entryGroup.Call(avahiEntryGroupIface+".Commit", 0).Err
 	if err != nil {
-		// Reset the entry group before returning error
-		if resetErr := entryGroup.Call(avahiEntryGroupIface+".Reset", 0).Err; resetErr != nil {
-			log.Printf("Avahi: warning - failed to reset entry group: %v", resetErr)
-		}
+		discard()
 		return fmt.Errorf("commit entry group: %w", err)
 	}
 
+	as.entryGroup = entryGroupPath
+	as.serviceName = name
 	return nil
 }
 
-// prepareTXTRecords creates TXT records for the service
-func (as *AvahiService) prepareTXTRecords() [][]byte {
-	return txtRecords(buildVersion())
-}
-
-// txtRecords builds the mDNS TXT records advertised for the given version.
-func txtRecords(ver string) [][]byte {
+// txtRecords builds the _snoopy._tcp TXT records advertised for the given
+// version; rtspPort, when not 0, adds rtsp=<port> for the RTSP stream.
+func txtRecords(ver string, rtspPort int) [][]byte {
 	records := []string{
 		"ver=" + ver,
 		"proto=http",
@@ -246,12 +275,25 @@ func txtRecords(ver string) [][]byte {
 		"sse=/sse/image",
 		"caps=stream,screencast",
 	}
-
-	txtRecords := make([][]byte, len(records))
-	for i, record := range records {
-		txtRecords[i] = []byte(record)
+	if rtspPort != 0 {
+		records = append(records, fmt.Sprintf("rtsp=%d", rtspPort))
 	}
-	return txtRecords
+	return toTXT(records)
+}
+
+// rtspTXTRecords are the _rtsp._tcp TXT records. VLC's Avahi module (Linux)
+// appends path; its microdns module (Windows, macOS, Android) ignores it and
+// opens rtsp://host:port, which snoopy serves too.
+func rtspTXTRecords() [][]byte {
+	return toTXT([]string{"path=/"})
+}
+
+func toTXT(records []string) [][]byte {
+	txt := make([][]byte, len(records))
+	for i, record := range records {
+		txt[i] = []byte(record)
+	}
+	return txt
 }
 
 // getIPSuffix returns the last octet of the local IP address
@@ -479,6 +521,7 @@ type options struct {
 	imageCacheSize int
 	healthCheck    time.Duration
 	stallTimeout   time.Duration
+	rtsp           rtspConfig
 }
 
 func run(o options) error {
@@ -502,8 +545,10 @@ func run(o options) error {
 		return fmt.Errorf("create image cache: %w", err)
 	}
 
-	// Setup SSE broadcaster
+	// Setup SSE broadcaster, and the fan-out of captured frames to the
+	// optional RTSP stream.
 	broadcaster := newSSEBroadcaster()
+	hub := newFrameHub()
 
 	// Get username for default service name. The page reads the name through
 	// an atomic so it reflects any rename Avahi makes after registration.
@@ -534,13 +579,28 @@ func run(o options) error {
 		log.Printf("Warning: ffmpeg not found in PATH - web streaming will show static waiting image")
 		log.Printf("Install ffmpeg to enable live screen streaming feature")
 	} else {
-		go startScreenCaptureLoop(imageCache, broadcaster, o.imageInterval, o.outDir)
+		go startScreenCaptureLoop(ctx, imageCache, broadcaster, hub, o.imageInterval, o.outDir)
+	}
+
+	// Optional RTSP broadcast of the same frames. It never stops recording:
+	// any failure is logged and snoopy carries on without it.
+	rtspRunning := false
+	if o.rtsp.enabled {
+		if streamer, err := startRTSPFromCache(ctx, o.rtsp, hub, imageCache); err != nil {
+			log.Printf("Warning: RTSP stream disabled: %v", err)
+		} else {
+			defer streamer.Close()
+			rtspRunning = true
+		}
 	}
 
 	// Start Avahi service advertisement, unless only reachable locally.
 	if !shouldAdvertise(o.addr) {
-		log.Printf("mDNS advertisement skipped: bound to loopback %s (set %s=0.0.0.0 to expose on the LAN)", o.addr, envName("addr"))
-	} else if avahiService, err := newAvahiService(o.port); err != nil {
+		log.Printf("mDNS: _snoopy._tcp not advertised: bound to loopback %s (set %s=0.0.0.0 to expose on the LAN)", o.addr, envName("addr"))
+	}
+	if services := advertisedServices(buildVersion(), o.addr, o.port, rtspRunning, o.rtsp.addr, o.rtsp.port); len(services) == 0 {
+		log.Printf("mDNS advertisement skipped: nothing reachable from the LAN")
+	} else if avahiService, err := newAvahiService(services); err != nil {
 		log.Printf("Warning: Failed to start Avahi service: %v", err)
 		log.Printf("Service will not be advertised via mDNS/Bonjour")
 	} else {
@@ -601,11 +661,16 @@ func run(o options) error {
 	return nil
 }
 
-func startScreenCaptureLoop(cache *ImageCache, broadcaster *SSEBroadcaster, interval time.Duration, videoDir string) {
+func startScreenCaptureLoop(ctx context.Context, cache *ImageCache, broadcaster *SSEBroadcaster, hub *frameHub, interval time.Duration, videoDir string) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	for range ticker.C {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
 		// Find the most recent video file
 		videoFile, err := findMostRecentVideo(videoDir)
 		if err != nil {
@@ -661,6 +726,7 @@ func startScreenCaptureLoop(cache *ImageCache, broadcaster *SSEBroadcaster, inte
 		// Broadcast to SSE clients
 		imageURL := fmt.Sprintf("/images/%s", filename)
 		broadcaster.broadcast(imageURL)
+		hub.Publish(jpegData)
 		log.Printf("Captured and broadcast image: %s", filename)
 	}
 }

@@ -39,3 +39,26 @@
 # Live frames for the web page and mobile app.
 #SNOOPY_IMAGE_INTERVAL=5s
 #SNOOPY_IMAGE_CACHE_SIZE=100
+
+# RTSP stream of the screen (off by default), for VLC and other players.
+# WARNING: this broadcasts the screen to the local network. Without
+# SNOOPY_RTSP_USER/SNOOPY_RTSP_PASSWORD anyone who can reach the port can
+# watch; set both to require (digest) authentication. The stream shows the
+# same frames as the web page: one new picture every SNOOPY_IMAGE_INTERVAL,
+# repeated at 1 frame/s. Needs ffmpeg. It is advertised over mDNS as
+# _rtsp._tcp (VLC: View > Playlist > Local Network) unless bound to
+# loopback. RTSP over TCP only: open 8554/tcp in the firewall. To enable it
+# on one supervised desktop, add SNOOPY_RTSP=1 to its /etc/snoopy/snoopy.conf.
+#SNOOPY_RTSP=0
+# Independent of SNOOPY_ADDR (whose default stays 127.0.0.1).
+#SNOOPY_RTSP_ADDR=0.0.0.0
+#SNOOPY_RTSP_PORT=8554
+# auto: MPEG-4 Part 2 (ffmpeg's mpeg4 encoder, in every ffmpeg build
+# including Fedora's ffmpeg-free), else H.264 (libx264, libopenh264 or
+# h264_vaapi). mpeg4 or h264 force one and fail if ffmpeg lacks it.
+#SNOOPY_RTSP_CODEC=auto
+# Both or neither. Keep this file unreadable by others if you set them.
+#SNOOPY_RTSP_USER=
+#SNOOPY_RTSP_PASSWORD=
+# Frames taller than this are scaled down (aspect kept); 0 keeps the source.
+#SNOOPY_RTSP_MAX_HEIGHT=1080

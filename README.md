@@ -13,6 +13,8 @@ It has two parts:
   overlapping segments through GNOME Shell's screencast D-Bus API, extracts a
   JPEG frame every few seconds, serves them over HTTP with Server-Sent Events
   (SSE), and advertises itself over mDNS (Avahi) as `_snoopy._tcp`.
+  Optionally it also broadcasts those frames as an RTSP stream that VLC
+  finds on the local network ([Watch in VLC](#watch-in-vlc)).
 - **Mobile app** (`mobile/`, Flutter): discovers Snoopy servers on the LAN and
   shows the live stream, with on-device history, cleanup and save-to-gallery.
 
@@ -22,7 +24,7 @@ capturing long-running screen activity without manual effort.
 ## Security
 
 > [!WARNING]
-> **Security: Snoopy has no authentication.** By default it binds
+> **Security: the web interface has no authentication.** By default it binds
 > `127.0.0.1:8900` (this machine only) and is not announced over mDNS, so the
 > mobile app cannot find it. Once
 > [exposed on the LAN](#expose-on-the-lan) (`SNOOPY_ADDR=0.0.0.0`, required
@@ -32,6 +34,10 @@ capturing long-running screen activity without manual effort.
 > do that only on a trusted LAN, or keep loopback and use an SSH tunnel or an
 > authenticating reverse proxy. Recordings on disk are as sensitive as your
 > screen.
+> The [RTSP stream](#watch-in-vlc) is off by default; once enabled it
+> broadcasts the screen to the LAN on `0.0.0.0:8554` (and over mDNS) unless
+> `SNOOPY_RTSP_USER` and `SNOOPY_RTSP_PASSWORD` are set (digest login; the
+> video is not encrypted).
 
 ## Requirements
 
@@ -42,8 +48,9 @@ capturing long-running screen activity without manual effort.
 - systemd (the server runs as a systemd **user** service).
 - Avahi daemon, optional: advertises the server over mDNS once it is
   [exposed on the LAN](#expose-on-the-lan), so the mobile app can find it.
-- `ffmpeg`, optional: needed to extract live frames. Without it recording
-  still works and the web page shows a static "waiting" image.
+- `ffmpeg`, optional: needed to extract live frames (and for the RTSP
+  stream). Without it recording still works and the web page shows a static
+  "waiting" image.
   Install with `sudo dnf install ffmpeg` or `sudo apt install ffmpeg`.
 
 **Mobile app**
@@ -166,6 +173,13 @@ service reads optional files `/etc/snoopy/snoopy.conf` (all users), then
 | `-port` | `SNOOPY_PORT` | `8900` | HTTP port |
 | `-image-interval` | `SNOOPY_IMAGE_INTERVAL` | `5s` | Interval between frames extracted for streaming |
 | `-image-cache-size` | `SNOOPY_IMAGE_CACHE_SIZE` | `100` | Maximum number of JPEG frames kept in `~/.cache/snoopy/images` |
+| `-rtsp` | `SNOOPY_RTSP` | `false` | Broadcast the frames as an RTSP stream ([Watch in VLC](#watch-in-vlc)); accepts `1`/`true`/`yes`, `0`/`false`/`no` |
+| `-rtsp-addr` | `SNOOPY_RTSP_ADDR` | `0.0.0.0` | RTSP bind address, independent of `-addr`; loopback also skips its mDNS advertisement |
+| `-rtsp-port` | `SNOOPY_RTSP_PORT` | `8554` | RTSP port (TCP) |
+| `-rtsp-codec` | `SNOOPY_RTSP_CODEC` | `auto` | `auto` (MPEG-4 Part 2 if ffmpeg has the `mpeg4` encoder, else H.264), `mpeg4` or `h264` |
+| `-rtsp-user` | `SNOOPY_RTSP_USER` | | RTSP user name; set together with the password to require authentication |
+| `-rtsp-password` | `SNOOPY_RTSP_PASSWORD` | | RTSP password; never logged or shown by `-help` (prefer the variable: command lines are visible to local users) |
+| `-rtsp-max-height` | `SNOOPY_RTSP_MAX_HEIGHT` | `1080` | Scale taller frames down to this height (aspect kept, even sizes); `0` keeps the source size |
 | `-version` | | | Print version information and exit |
 
 Recorded segments are never deleted by Snoopy; prune `~/.cache/snoopy/video`
@@ -194,6 +208,39 @@ Managed mode cannot stop a user from stopping or overriding the user unit;
 pair it with the root `snoopy-attest` service (see
 [Supervised desktops: snoopy-attest](#supervised-desktops-snoopy-attest)),
 which checks that recording is happening to the configured location.
+
+## Watch in VLC
+
+Snoopy can broadcast the captured screen over RTSP for VLC. It is **off by
+default**; read [Security](#security), add these lines to that desktop's
+`/etc/snoopy/snoopy.conf` and restart the service (or log in again):
+
+```bash
+SNOOPY_RTSP=1
+SNOOPY_RTSP_USER=viewer
+SNOOPY_RTSP_PASSWORD=change-me
+```
+
+In VLC open **View → Playlist → Local Network → Zeroconf network services**
+(Linux) or **mDNS Network Discovery** (Windows, macOS, Android) and pick the
+desktop, or open `rtsp://<host>:8554/` (any path works) directly.
+
+- **Picture:** the web page's frames, a new one every `-image-interval`,
+  repeated at 1 frame/s with a keyframe every 2 s, a few seconds behind; the
+  "waiting" image until the first capture. Players must reconnect after a
+  resolution change (also once shortly after start, when the first capture
+  replaces the "waiting" image). Height is capped at `-rtsp-max-height`.
+- **Codec:** `auto` uses MPEG-4 Part 2 (ffmpeg's `mpeg4` encoder), which
+  Fedora's `ffmpeg-free` has, so Fedora desktops get MPEG-4 Part 2; failing
+  that, H.264 via `libx264`, `libopenh264` or `h264_vaapi` (`ffmpeg-free`
+  lacks `libx264`; its `libopenh264` needs Cisco's `openh264`, not the
+  `noopenh264` stub). An encoder that fails to start is skipped.
+- **Network:** RTSP over TCP only (no UDP ports; VLC falls back to TCP by
+  itself): open `8554/tcp` (`sudo firewall-cmd --permanent
+  --add-port=8554/tcp && sudo firewall-cmd --reload`). mDNS (`_rtsp._tcp`)
+  needs Avahi and a non-loopback `SNOOPY_RTSP_ADDR`. Publishing is refused.
+- **Failures:** if ffmpeg, an encoder or the port is unavailable, Snoopy
+  logs why and keeps recording. A crashed encoder restarts with backoff.
 
 ## Supervised desktops: snoopy-attest
 
@@ -245,8 +292,11 @@ Open `http://<host>:8900/` in a browser for a live view that updates over SSE
 
 The mDNS advertisement (`_snoopy._tcp`, only when not bound to loopback) carries TXT records `ver=<version>`
 (the server's real version, as printed by `snoopy -version`; `dev` or a
-Go pseudo-version for local builds), `proto=http`, `path=/`, `sse=/sse/image` and
-`caps=stream,screencast`.
+Go pseudo-version for local builds), `proto=http`, `path=/`, `sse=/sse/image`,
+`caps=stream,screencast` and, while the [RTSP stream](#watch-in-vlc) runs on
+a non-loopback address, `rtsp=<port>`; the stream itself is advertised as
+`_rtsp._tcp` (TXT `path=/`) under the same name.
+
 
 The HTTP API is not yet stable: endpoints, flags and TXT records may change
 before 1.0.
