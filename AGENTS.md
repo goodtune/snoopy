@@ -14,8 +14,9 @@ duplicate README content here.
 | Path | What lives there |
 | --- | --- |
 | `server/` | Go module root (`go.mod`, `main.go`, tests, `.golangci.yml`, both units and example configs); one module, two binaries |
-| `server/main.go` | `realMain`/`run`, Avahi advertisement (`txtRecords`), ffmpeg frame extraction, image cache, HTTP handlers (`newHTTPHandler`) |
-| `server/config.go` | Flags and their `SNOOPY_*` env defaults (`envDefaults`), managed mode (`loadManagedFile`, pure `resolveConfig`) |
+| `server/main.go` | `realMain`/`run`, Avahi advertisement (pure `advertisedServices`, `txtRecords`; one entry group), ffmpeg frame extraction (publishes each frame to a `frameHub`), image cache, HTTP handlers (`newHTTPHandler`) |
+| `server/rtsp.go` | Optional RTSP stream: `rtspConfig`, `frameHub`, encoder selection (`parseEncoders`, `encoderCandidates`), `ffmpegArgs`, access-unit splitters, supervised encoder (`rtspStreamer.supervise`), gortsplib server handler |
+| `server/config.go` | Flags and their `SNOOPY_*` env defaults (`envDefaults`, incl. `bool`), managed mode (`loadManagedFile`, pure `resolveConfig`) |
 | `server/record.go` | Screencast loop (`recordLoop`, `rotate`, `screencaster`), restart/backoff and stall detection |
 | `server/events.go` | Session events (`sessionEvents`): lock/unlock, resume, screencast `Error`, from D-Bus signals |
 | `server/snoopy.service` | systemd **user** unit, installed to `/usr/lib/systemd/user/`; reads optional `EnvironmentFile`s `/etc/snoopy/snoopy.conf` and `%h/.config/snoopy/snoopy.conf` |
@@ -130,6 +131,19 @@ CI mirrors these commands; keep them passing locally before pushing.
 - **Loopback by default**: `-addr` defaults to `127.0.0.1`. `shouldAdvertise`
   skips the Avahi advertisement for loopback binds (`127.0.0.0/8`, `::1`,
   `localhost`); exposing on the LAN is `SNOOPY_ADDR=0.0.0.0` in a conf file.
+- **RTSP stream** (`server/rtsp.go`, off unless `-rtsp`): optional, and it
+  must never take recording down: a missing ffmpeg/encoder or a busy port is
+  logged and `run` carries on. One `ffmpeg` child (image2pipe JPEG in,
+  `m4v`/`h264` elementary stream out) is supervised with backoff and killed
+  through the deferred `Close`; snoopy splits its output at start codes and
+  packetises it with gortsplib onto its own `ServerStream` (kept across
+  encoder restarts while the codec parameters match). Nobody may publish
+  (ANNOUNCE is refused). `OnRequest` maps every URL to one canonical path so
+  `rtsp://host:port` works for VLC's mDNS module; digest checks use the
+  original URL. The password is applied after flag parsing so `-help` never
+  shows it, and it must never appear in logs or errors. What gets announced
+  is the pure `advertisedServices` (unit-tested); integration tests use the
+  real ffmpeg/ffprobe and skip without them (CI installs ffmpeg).
 - **Version**: injected at link time (`-X main.version=...`, plus `commit`
   and `date`); `snoopy -version` prints it and the same value is advertised
   in the mDNS TXT record `ver=`. Clients must treat `ver` as informational

@@ -138,26 +138,68 @@ func TestImageCachePrunesOldest(t *testing.T) {
 func TestTXTRecords(t *testing.T) {
 	for _, ver := range []string{"0.1.0", "dev", "1.2.3-next"} {
 		t.Run(ver, func(t *testing.T) {
-			var got []string
-			for _, r := range txtRecords(ver) {
-				got = append(got, string(r))
-			}
 			want := []string{"ver=" + ver, "proto=http", "path=/", "sse=/sse/image", "caps=stream,screencast"}
-			if strings.Join(got, "|") != strings.Join(want, "|") {
-				t.Errorf("got %v, want %v", got, want)
+			if got := txtStrings(txtRecords(ver, 0)); strings.Join(got, "|") != strings.Join(want, "|") {
+				t.Errorf("without RTSP: got %v, want %v", got, want)
+			}
+			want = append(want, "rtsp=8554")
+			if got := txtStrings(txtRecords(ver, 8554)); strings.Join(got, "|") != strings.Join(want, "|") {
+				t.Errorf("with RTSP: got %v, want %v", got, want)
 			}
 		})
 	}
+	if got := txtStrings(rtspTXTRecords()); strings.Join(got, "|") != "path=/" {
+		t.Errorf("rtspTXTRecords() = %v, want [path=/]", got)
+	}
+}
 
-	t.Run("method uses build version", func(t *testing.T) {
-		old := version
-		t.Cleanup(func() { version = old })
-		version = "9.8.7"
-		recs := (&AvahiService{}).prepareTXTRecords()
-		if string(recs[0]) != "ver=9.8.7" {
-			t.Errorf("first record = %q, want ver=9.8.7", recs[0])
-		}
-	})
+func txtStrings(recs [][]byte) []string {
+	var out []string
+	for _, r := range recs {
+		out = append(out, string(r))
+	}
+	return out
+}
+
+func TestAdvertisedServices(t *testing.T) {
+	type svc struct {
+		typ  string
+		port int
+		rtsp bool // _snoopy._tcp carries rtsp=
+	}
+	tests := []struct {
+		name        string
+		httpAddr    string
+		rtspRunning bool
+		rtspAddr    string
+		want        []svc
+	}{
+		{"loopback, no rtsp", "127.0.0.1", false, "0.0.0.0", nil},
+		{"lan, no rtsp", "0.0.0.0", false, "0.0.0.0", []svc{{"_snoopy._tcp", 8900, false}}},
+		{"lan, rtsp enabled but not running", "0.0.0.0", false, "0.0.0.0", []svc{{"_snoopy._tcp", 8900, false}}},
+		{"lan, rtsp lan", "0.0.0.0", true, "0.0.0.0", []svc{{"_snoopy._tcp", 8900, true}, {"_rtsp._tcp", 8554, false}}},
+		{"loopback http, rtsp lan", "127.0.0.1", true, "", []svc{{"_rtsp._tcp", 8554, false}}},
+		{"lan http, rtsp loopback", "0.0.0.0", true, "::1", []svc{{"_snoopy._tcp", 8900, false}}},
+		{"both loopback", "localhost", true, "127.0.0.1", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := advertisedServices("1.0.0", tt.httpAddr, 8900, tt.rtspRunning, tt.rtspAddr, 8554)
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %d services %+v, want %+v", len(got), got, tt.want)
+			}
+			for i, w := range tt.want {
+				g := got[i]
+				hasRTSP := strings.Contains(strings.Join(txtStrings(g.txt), "|"), "rtsp=8554")
+				if g.typ != w.typ || g.port != w.port || hasRTSP != w.rtsp {
+					t.Errorf("service %d = %s:%d txt=%v, want %+v", i, g.typ, g.port, txtStrings(g.txt), w)
+				}
+				if g.typ == "_rtsp._tcp" && strings.Join(txtStrings(g.txt), "|") != "path=/" {
+					t.Errorf("_rtsp._tcp TXT = %v, want path=/", txtStrings(g.txt))
+				}
+			}
+		})
+	}
 }
 
 func TestIPSuffixFromAddrs(t *testing.T) {

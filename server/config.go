@@ -94,6 +94,33 @@ func (e *envDefaults) int(name string, def int) int {
 	return n
 }
 
+// bool parses a boolean variable with the same spellings as SNOOPY_MANAGED
+// (1, true, yes / 0, false, no, any case).
+func (e *envDefaults) bool(name string, def bool) bool {
+	key, v, ok := e.value(name)
+	if !ok {
+		return def
+	}
+	b, valid := parseBool(v)
+	if !valid {
+		e.errs = append(e.errs, fmt.Errorf("%s=%q: not a boolean (1, true, yes / 0, false, no)", key, v))
+		return def
+	}
+	return b
+}
+
+// parseBool accepts 1, true, yes and 0, false, no (any case, surrounding
+// space ignored). The empty string is false.
+func parseBool(v string) (value, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes":
+		return true, true
+	case "", "0", "false", "no":
+		return false, true
+	}
+	return false, false
+}
+
 // err reports every invalid variable on a single line, or nil.
 func (e *envDefaults) err() error {
 	if len(e.errs) == 0 {
@@ -162,11 +189,8 @@ type resolved struct {
 
 // parseManagedSwitch parses the SNOOPY_MANAGED value.
 func parseManagedSwitch(v string) (bool, error) {
-	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "1", "true", "yes":
-		return true, nil
-	case "", "0", "false", "no":
-		return false, nil
+	if b, ok := parseBool(v); ok {
+		return b, nil
 	}
 	return false, fmt.Errorf("%s=%q: not a boolean (1, true, yes / 0, false, no)", managedKey, v)
 }
@@ -229,6 +253,16 @@ func resolveConfig(mf managedFile, lookupEnv func(string) (string, bool), args [
 	fset.IntVar(&o.imageCacheSize, "image-cache-size", env.int("image-cache-size", 100), usage("image-cache-size", "Maximum number of images to keep in cache"))
 	fset.DurationVar(&o.healthCheck, "health-check", env.duration("health-check", 15*time.Second), usage("health-check", "Interval for DBus connection health checks"))
 	fset.DurationVar(&o.stallTimeout, "stall-timeout", env.duration("stall-timeout", 5*time.Minute), usage("stall-timeout", "Restart the segment if its file has not grown for this long (0 disables)"))
+	fset.BoolVar(&o.rtsp.enabled, "rtsp", env.bool("rtsp", false), usage("rtsp", "Broadcast the captured frames as an RTSP stream (MPEG-4) and advertise it over mDNS"))
+	fset.StringVar(&o.rtsp.addr, "rtsp-addr", env.string("rtsp-addr", "0.0.0.0"), usage("rtsp-addr", "RTSP server bind address (independent of -addr)"))
+	fset.IntVar(&o.rtsp.port, "rtsp-port", env.int("rtsp-port", 8554), usage("rtsp-port", "RTSP server port (TCP)"))
+	fset.StringVar(&o.rtsp.codec, "rtsp-codec", env.string("rtsp-codec", rtspCodecAuto), usage("rtsp-codec", "RTSP video codec: auto (MPEG-4 Part 2 if available, else H.264), mpeg4 or h264"))
+	fset.StringVar(&o.rtsp.user, "rtsp-user", env.string("rtsp-user", ""), usage("rtsp-user", "RTSP user name readers must authenticate with (requires -rtsp-password)"))
+	// The password's default is applied after parsing so that -help never
+	// prints it.
+	fset.StringVar(&o.rtsp.password, "rtsp-password", "", usage("rtsp-password", "RTSP password (requires -rtsp-user; prefer the environment variable, command lines are visible to other local users)"))
+	envPassword := env.string("rtsp-password", "")
+	fset.IntVar(&o.rtsp.maxHeight, "rtsp-max-height", env.int("rtsp-max-height", 1080), usage("rtsp-max-height", "Downscale RTSP frames taller than this many pixels (0 keeps the source size)"))
 	fset.BoolVar(&showVersion, "version", false, "Print version information and exit")
 	if managed {
 		fset.Usage = func() {
@@ -287,6 +321,10 @@ func resolveConfig(mf managedFile, lookupEnv func(string) (string, bool), args [
 		sort.Strings(res.ignored)
 	}
 
+	if o.rtsp.password == "" {
+		o.rtsp.password = envPassword
+	}
+
 	if err := env.err(); err != nil {
 		if managed {
 			return res, fmt.Errorf("invalid %s: %w", mf.path, err)
@@ -295,6 +333,10 @@ func resolveConfig(mf managedFile, lookupEnv func(string) (string, bool), args [
 	}
 	if o.segment <= 0 || o.healthCheck <= 0 || o.imageInterval <= 0 || o.pause < 0 || o.stallTimeout < 0 {
 		return res, errors.New("-segment, -health-check and -image-interval must be positive and -pause and -stall-timeout must not be negative")
+	}
+
+	if err := o.rtsp.validate(); err != nil {
+		return res, err
 	}
 
 	res.opts = o
