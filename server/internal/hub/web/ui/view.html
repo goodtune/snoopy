@@ -1,0 +1,24 @@
+{{template "head" .}}
+<header class="bar view-bar">
+  <a class="button back" href="/"><span aria-hidden="true">←</span> All screens</a>
+  <div class="titles">
+    <h1 id="v-name">{{.Name}}</h1>
+    <p class="sub">
+      <span id="v-host">{{.Host}}</span>
+      <span id="v-version" class="version">{{if .Version}}snoopy {{.Version}}{{end}}</span>
+      <span id="v-state" class="state">…</span>
+      <span id="v-age" class="age"></span>
+    </p>
+  </div>
+  <nav class="actions" aria-label="Screen actions">
+    <span class="rtsp" id="v-rtsp"></span>
+    <a class="button" id="prev" rel="prev" href="/" hidden aria-keyshortcuts="ArrowLeft"><span aria-hidden="true">‹</span> Previous</a>
+    <a class="button" id="next" rel="next" href="/" hidden aria-keyshortcuts="ArrowRight">Next <span aria-hidden="true">›</span></a>
+    <button type="button" class="button" id="fullscreen" aria-keyshortcuts="f">Fullscreen</button>
+  </nav>
+</header>
+<main id="main" class="stage" tabindex="-1">
+  <img id="v-img" alt="Screen of {{.Name}}">
+  <p class="none" id="v-none" hidden>No frame from this screen yet.</p>
+</main>
+{{template "foot" .}}

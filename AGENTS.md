@@ -13,7 +13,7 @@ duplicate README content here.
 
 | Path | What lives there |
 | --- | --- |
-| `server/` | Go module root (`go.mod`, `main.go`, tests, `.golangci.yml`, both units and example configs); one module, two binaries |
+| `server/` | Go module root (`go.mod`, `main.go`, tests, `.golangci.yml`, all units and example configs); one module, three binaries |
 | `server/main.go` | `realMain`/`run`, Avahi advertisement (pure `advertisedServices`, `txtRecords`; one entry group), ffmpeg frame extraction (publishes each frame to a `frameHub`), image cache, HTTP handlers (`newHTTPHandler`) |
 | `server/rtsp.go` | Optional RTSP stream: `rtspConfig`, `frameHub`, encoder selection (`parseEncoders`, `encoderCandidates`), `ffmpegArgs`, access-unit splitters, supervised encoder (`rtspStreamer.supervise`), gortsplib server handler |
 | `server/config.go` | Flags and their `SNOOPY_*` env defaults (`envDefaults`, incl. `bool`), managed mode (`loadManagedFile`, pure `resolveConfig`) |
@@ -28,9 +28,19 @@ duplicate README content here.
 | `server/internal/attest/{procfs,logind,pki,heartbeat}` | Injectable `/proc` reader (+ `procfstest` fake trees), logind client, device key/cert and SPKI pin, heartbeat v1 client |
 | `server/snoopy-attest.service` | systemd **system** unit, installed to `/usr/lib/systemd/system/`, never enabled by the package; reduced capabilities and sandbox |
 | `server/attest.conf.example` | Commented `SNOOPY_ATTEST_*` settings; packaged to `/usr/share/doc/snoopy/` and at the tarball root |
+| `server/cmd/snoopy-hub/` | Hub CLI (`realMain`, `-version`); exit 0 on signal/-help/-version, 1 runtime error, 2 usage/config error |
+| `server/internal/hub/` | Hub config (`SNOOPY_HUB_*`, `ParseConfig`, its own `envDefaults` mirroring the recorder's), TLS (self-signed generation/reuse, file reload), `Run` (listeners, HTTP→HTTPS redirect, wiring) |
+| `server/internal/hub/discovery` | `Browser` interface, `Supervise` (backoff, `Reset` on failure), Avahi D-Bus browser (`ServiceBrowserNew`/`ResolveService` behind the `avahiBus` interface), `ParseTXT` |
+| `server/internal/hub/registry` | Service registry (sightings deduplicated by name+host, IPv4 preferred, `ID` slugs, change subscriptions), `ParseStatic`, health `Prober`, the no-redirect HTTP client |
+| `server/internal/hub/upstream` | One SSE connection per online desktop, newest-frame cache (size cap), fan-out to subscribers, image fetch (`ValidImageName`) |
+| `server/internal/hub/web` | Routes, API, SSE, auth and security headers; `ui/` holds the embedded templates, `hub.js`, `hub.css` (vanilla, no build step) |
+| `server/internal/hub/hubtest` | Fake snoopy desktop (`httptest`) for the hub's tests |
+| `server/snoopy-hub.service` | systemd **system** unit (`DynamicUser=yes`, `CAP_NET_BIND_SERVICE` only), installed to `/usr/lib/systemd/system/`, never enabled by the package |
+| `server/hub.conf.example` | Commented `SNOOPY_HUB_*` settings; packaged to `/usr/share/doc/snoopy/` and at the tarball root; every flag must appear in it (tested) |
+| `docs/hub.md` | Hub guide (deployment, configuration table, TLS, firewall, security, API); packaged to `/usr/share/doc/snoopy/` |
 | `docs/attestation.md` | Attestor threat model, checks, states, **normative heartbeat protocol**, runbook; packaged to `/usr/share/doc/snoopy/` |
 | `scripts/` | nfpm post-install (prints how to enable; never enables) / pre-remove (global disable on erase) scripts |
-| `.goreleaser.yaml` | Release build (`dir: server`, builds `snoopy` and `snoopy-attest`): tar.gz, rpm, deb; changelog disabled |
+| `.goreleaser.yaml` | Release build (`dir: server`, builds `snoopy`, `snoopy-attest` and `snoopy-hub`): tar.gz, rpm, deb; changelog disabled |
 | `mobile/` | Flutter app; platforms: android, ios, macos. Code in `mobile/lib/{models,screens,services,widgets}` |
 | `assets/`, `mobile/assets/` | Images, stored in Git LFS (CI checkouts use `lfs: true`) |
 | `.github/workflows/` | `server.yml`, `mobile.yml` (CI), `release.yml` (tag-driven release) |
@@ -43,11 +53,12 @@ Server (run from `server/`):
 ```bash
 gofmt -l .                 # must print nothing
 go vet ./...
-go build ./...             # both binaries
+go build ./...             # all three binaries
 go test -race -count=1 ./...
 golangci-lint run          # v2 config in server/.golangci.yml, whole module
 go run . -version
 go run ./cmd/snoopy-attest -version
+go run ./cmd/snoopy-hub -version
 ```
 
 Running the server for real needs a GNOME Shell session on the D-Bus session
@@ -195,6 +206,32 @@ CI mirrors these commands; keep them passing locally before pushing.
   `findMostRecentVideo`) and unit name (`snoopy.service`). Keep them in
   agreement; `TestParseManagedSwitchTable` and
   `TestManagedSwitchOnAgreesWithRecorder` pin the same truth table.
+- **Hub (`snoopy-hub`)**: discovery sits behind `discovery.Browser` (the
+  Avahi code behind `avahiBus`); test with fake browsers/buses and the
+  `hubtest` fake desktop, never a real Avahi or system bus. Avahi being
+  unavailable is never fatal: `Supervise` logs, emits `Reset` and retries,
+  static entries keep working. Browse subscribes to the ServiceBrowser
+  signals before `ServiceBrowserNew` so no early `ItemNew` is lost.
+- **Hub proxy**: the hub only connects to `Service.DialAddr()` of a registry
+  entry looked up by id; never build an upstream URL from request data other
+  than a name that passed `ValidImageName`. The desktop client must not
+  follow redirects (`registry.NewHTTPClient`). Keep one upstream SSE
+  connection per online desktop (`upstream.Manager`), fanned out to
+  browsers; the UI uses the single `/api/events` stream.
+- **Untrusted network strings**: instance names, host names and TXT values
+  come from anyone on the LAN. Escape them (html/template, encoding/json,
+  `textContent` in `hub.js`, never `innerHTML`), never use them in ids
+  unslugged (`registry.ID`), and only put validated host names
+  (`registry.ValidHost`) into `rtsp://` URLs.
+- **Hub UI**: embedded vanilla HTML/CSS/JS in `internal/hub/web/ui` (not a
+  directory named `assets`: `**/assets/**` is stored in Git LFS), no build step, no external assets or CDNs, nothing inline (the CSP allows
+  only `'self'`). Keep it keyboard operable, readable in light and dark, and
+  usable at phone widths.
+- **Hub flags** follow the env-fallback convention with the `SNOOPY_HUB_`
+  prefix; a new flag needs a line in `server/hub.conf.example` and a row in
+  the `docs/hub.md` table. The password is applied after parsing so `-help`
+  never shows it, and it must never be logged. The hub unit is never enabled
+  by the package (`postinstall.sh` only `try-restart`s it).
 - Dependencies are updated by Renovate; do not add Dependabot config.
 
 ## Releasing

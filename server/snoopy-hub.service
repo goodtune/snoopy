@@ -1,0 +1,69 @@
+[Unit]
+Description=Snoopy hub - web index and viewer for the snoopy screens on the network
+Documentation=file:/usr/share/doc/snoopy/hub.md https://github.com/goodtune/snoopy
+# Discovers desktops through avahi-daemon on the system bus (optional: without
+# it only SNOOPY_HUB_STATIC entries are listed, and discovery retries) and
+# serves HTTPS on 443. Not enabled by the package:
+#   sudo systemctl enable --now snoopy-hub.service
+After=network-online.target avahi-daemon.service dbus.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# SNOOPY_HUB_* settings (see /usr/share/doc/snoopy/hub.conf.example).
+EnvironmentFile=-/etc/snoopy/hub.conf
+ExecStart=/usr/bin/snoopy-hub
+# Re-reads SNOOPY_HUB_TLS_CERT / SNOOPY_HUB_TLS_KEY (also done on change).
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+
+# --- Identity and state ---
+# A transient, unprivileged user. Avahi's default D-Bus policy
+# (avahi-dbus.conf) lets any user call its methods except SetHostName and
+# receive its signals, so browsing needs no extra policy or static user.
+DynamicUser=yes
+# /var/lib/snoopy-hub (a symlink into /var/lib/private) holds the generated
+# self-signed certificate; key.pem is 0600.
+StateDirectory=snoopy-hub
+StateDirectoryMode=0700
+UMask=0077
+
+# --- Privileges ---
+# Only to bind ports 80 and 443 as the dynamic user.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+
+# --- Sandbox ---
+# Needs: the system D-Bus socket (/run/dbus, readable under
+# ProtectSystem=strict), outbound TCP to the desktops on the LAN (8900/tcp),
+# netlink to list its own addresses for the certificate. Do not set
+# PrivateNetwork= or PrivateUsers= (the latter would make
+# CAP_NET_BIND_SERVICE useless).
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

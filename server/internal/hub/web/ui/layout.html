@@ -1,0 +1,22 @@
+{{define "head"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<title>{{.Title}} · Snoopy hub</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/hub.css">
+<script src="/static/hub.js" defer></script>
+</head>
+<body class="page-{{.Page}}" data-page="{{.Page}}" data-id="{{.ID}}" data-ids="{{.IDs}}">
+<a class="skip" href="#main">Skip to content</a>
+{{end}}
+
+{{define "foot"}}
+<noscript><p class="noscript">The live screens need JavaScript; the JSON list is at <a href="/api/services">/api/services</a>.</p></noscript>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>
+{{end}}

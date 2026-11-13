@@ -1,0 +1,35 @@
+{{template "head" .}}
+<header class="bar">
+  <h1 class="brand"><a href="/"><img src="/static/favicon.svg" alt="" width="28" height="28"><span>Snoopy hub</span></a></h1>
+  <p class="summary" id="summary" aria-live="polite">Connecting…</p>
+  <div class="actions">
+    <button type="button" class="button" id="select-toggle" aria-pressed="false">Select</button>
+    <a class="button" href="/wall" id="wall-all">Wall of all</a>
+  </div>
+</header>
+<div class="selectbar" id="selectbar" hidden>
+  <span id="select-count" aria-live="polite">Pick screens to view together</span>
+  <span class="spacer"></span>
+  <button type="button" class="button" id="select-clear">Clear</button>
+  <button type="button" class="button primary" id="view-selected" disabled>View selected</button>
+</div>
+<main id="main" class="index">
+  <section aria-labelledby="online-heading">
+    <h2 id="online-heading" class="visually-hidden">Online screens</h2>
+    <ul class="grid" id="grid"></ul>
+  </section>
+  <section class="empty" id="empty" hidden aria-labelledby="empty-heading">
+    <h2 id="empty-heading">No screens online</h2>
+    <p>Desktops running snoopy appear here by themselves when the hub can see them:</p>
+    <ul>
+      <li>On each desktop, expose snoopy on the LAN with <code>SNOOPY_ADDR=0.0.0.0</code> in <code>/etc/snoopy/snoopy.conf</code> and restart it; it then advertises itself over mDNS (Avahi) as <code>_snoopy._tcp</code>.</li>
+      <li>The hub needs avahi-daemon on the same network segment to hear those announcements.</li>
+      <li>Where mDNS does not reach, list desktops in <code>SNOOPY_HUB_STATIC</code> in <code>/etc/snoopy/hub.conf</code>, for example <code>alice=alice-pc.example.net:8900</code>.</li>
+    </ul>
+  </section>
+  <section class="offline-section" id="offline-section" hidden aria-labelledby="offline-heading">
+    <h2 id="offline-heading">Offline</h2>
+    <ul class="offline-list" id="offline"></ul>
+  </section>
+</main>
+{{template "foot" .}}
