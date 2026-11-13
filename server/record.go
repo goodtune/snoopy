@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/godbus/dbus/v5"
@@ -27,6 +28,53 @@ type screencaster interface {
 }
 
 const dbusCallTimeout = 10 * time.Second
+
+// GNOME Shell refuses Screencast and ScreencastArea while the
+// org.gnome.desktop.lockdown key disable-save-to-disk is true (GDM sets it
+// for its login screen; administrators can set it for users):
+//
+//	invocation.return_error_literal(ScreencastErrors,
+//	    ScreencastError.SAVE_TO_DISK_DISABLED, 'Saving to disk is disabled');
+//
+// (js/dbusServices/screencast/screencastService.js, ScreencastAsync and
+// ScreencastAreaAsync, unchanged from gnome-46 to main). js/misc/dbusErrors.js
+// registers the domain with Gio.dbus_error_register_error as
+// org.gnome.Shell.Screencast.Error.<CamelCase>, so SAVE_TO_DISK_DISABLED (2)
+// arrives as the D-Bus error below with the message as its only body
+// argument; godbus returns it as a dbus.Error whose Error() is the message.
+// Were the domain ever left unregistered, GDBus would send the unmapped
+// GError name instead (quark "shell-screencast-error", code 2).
+const (
+	saveToDiskDisabledName     = "org.gnome.Shell.Screencast.Error.SaveToDiskDisabled"
+	saveToDiskDisabledUnmapped = "org.gtk.GDBus.UnmappedGError.Quark._shell_2dscreencast_2derror.Code2"
+	saveToDiskDisabledMessage  = "Saving to disk is disabled"
+)
+
+// lockdownRetryDelay is how often the loop retries while the session's
+// lockdown setting disables saving screencasts to disk.
+const lockdownRetryDelay = 60 * time.Second
+
+// isSaveToDiskDisabled reports whether err is GNOME Shell refusing to record
+// because saving to disk is administratively disabled. That is a setting,
+// not a transient fault, so the loop waits instead of exiting.
+func isSaveToDiskDisabled(err error) bool {
+	if err == nil {
+		return false
+	}
+	var name string
+	var de dbus.Error
+	var dep *dbus.Error
+	switch {
+	case errors.As(err, &de):
+		name = de.Name
+	case errors.As(err, &dep) && dep != nil:
+		name = dep.Name
+	}
+	if name == saveToDiskDisabledName || name == saveToDiskDisabledUnmapped {
+		return true
+	}
+	return strings.Contains(err.Error(), saveToDiskDisabledMessage)
+}
 
 type dbusScreencaster struct {
 	conn *dbus.Conn
@@ -83,6 +131,9 @@ type loopConfig struct {
 	events sessionEvents
 	// stat inspects the segment file; nil means os.Stat.
 	stat func(string) (os.FileInfo, error)
+	// lockdownRetry is the wait between attempts while saving to disk is
+	// disabled. Zero means lockdownRetryDelay; tests shorten it.
+	lockdownRetry time.Duration
 }
 
 // recorder is the record loop's state. Only active (if non-nil) may hold a
@@ -94,7 +145,11 @@ type recorder struct {
 	active, spare screencaster
 	file          string // file being written by active
 	locked        bool
-	retries       int // consecutive failed (re)starts, for backoff
+	retries       int   // consecutive failed (re)starts, for backoff
+	lastErr       error // last start failure from restart
+	// lockdown: GNOME Shell refuses to record because saving to disk is
+	// disabled; retries are quiet and paced by cfg.lockdownRetry.
+	lockdown bool
 
 	// Stall detection: last observed size/mtime of file and when it last
 	// changed (or the segment started).
@@ -114,6 +169,11 @@ type recorder struct {
 // with backoff while the shell is not ready). A stalled segment file
 // (cfg.stallTimeout) also triggers a restart, as a fallback for anything the
 // signals miss.
+//
+// If the shell refuses with "Saving to disk is disabled" (the session's
+// org.gnome.desktop.lockdown disable-save-to-disk setting), at startup or
+// later, the loop logs once and retries quietly every cfg.lockdownRetry
+// instead of failing; it logs again when recording finally starts.
 func recordLoop(ctx context.Context, cfg loopConfig, a, b screencaster) error {
 	if cfg.stat == nil {
 		cfg.stat = os.Stat
@@ -123,6 +183,9 @@ func recordLoop(ctx context.Context, cfg loopConfig, a, b screencaster) error {
 	}
 	if cfg.retryDelay <= 0 {
 		cfg.retryDelay = cfg.recoverDelay
+	}
+	if cfg.lockdownRetry <= 0 {
+		cfg.lockdownRetry = lockdownRetryDelay
 	}
 	r := &recorder{cfg: cfg, a: a, b: b, spare: b}
 
@@ -136,11 +199,15 @@ func recordLoop(ctx context.Context, cfg loopConfig, a, b screencaster) error {
 		log.Printf("Session is locked; recording will start when it is unlocked")
 	} else {
 		file, err := a.Start(cfg.template)
-		if err != nil {
+		switch {
+		case isSaveToDiskDisabled(err):
+			r.enterLockdown()
+		case err != nil:
 			return fmt.Errorf("start initial screencast: %w", err)
+		default:
+			log.Printf("Started initial recording: %s", file)
+			r.recording(a, b, file)
 		}
-		log.Printf("Started initial recording: %s", file)
-		r.recording(a, b, file)
 	}
 
 	defer func() {
@@ -159,12 +226,48 @@ func recordLoop(ctx context.Context, cfg loopConfig, a, b screencaster) error {
 	// must not be recreated per select iteration, or every health-check tick
 	// would restart the segment countdown. While nothing is recording it
 	// paces the restart attempts instead.
-	segmentTimer := time.NewTimer(cfg.segment)
+	firstWait := cfg.segment
+	if r.lockdown {
+		firstWait = cfg.lockdownRetry
+	}
+	segmentTimer := time.NewTimer(firstWait)
 	defer segmentTimer.Stop()
+
+	// retryLockdown quietly tries to start while saving to disk is disabled
+	// and arms the timer for the next segment, the next lockdown retry, or
+	// (if the shell now fails for another reason) a normal backoff retry.
+	retryLockdown := func() error {
+		sc, file, err := r.startQuiet()
+		if err == nil {
+			log.Printf("Saving to disk is allowed again; started recording: %s", file)
+			other := r.b
+			if sc == r.b {
+				other = r.a
+			}
+			r.recording(sc, other, file)
+			segmentTimer.Reset(cfg.segment)
+			return nil
+		}
+		if perr := r.ping(); perr != nil {
+			return perr
+		}
+		if isSaveToDiskDisabled(err) {
+			segmentTimer.Reset(cfg.lockdownRetry)
+			return nil
+		}
+		log.Printf("Start screencast failed: %v", err)
+		r.lockdown = false
+		r.retries++
+		segmentTimer.Reset(r.backoff())
+		return nil
+	}
 
 	// restart starts a fresh segment now and arms the timer for the next
 	// rotation, or for a retry with backoff if no recording could start.
 	restart := func(reason string) error {
+		if r.lockdown && r.active == nil {
+			return retryLockdown()
+		}
 		log.Printf("Starting a fresh segment: %s", reason)
 		if r.restart(ctx) {
 			segmentTimer.Reset(cfg.segment)
@@ -172,6 +275,11 @@ func recordLoop(ctx context.Context, cfg loopConfig, a, b screencaster) error {
 		}
 		if err := r.ping(); err != nil {
 			return err
+		}
+		if isSaveToDiskDisabled(r.lastErr) {
+			r.enterLockdown()
+			segmentTimer.Reset(cfg.lockdownRetry)
+			return nil
 		}
 		segmentTimer.Reset(r.backoff())
 		return nil
@@ -252,6 +360,11 @@ func recordLoop(ctx context.Context, cfg loopConfig, a, b screencaster) error {
 					return perr
 				}
 				r.active = nil
+				if isSaveToDiskDisabled(err) {
+					r.enterLockdown()
+					segmentTimer.Reset(cfg.lockdownRetry)
+					continue
+				}
 				if r.locked {
 					segmentTimer.Reset(cfg.segment)
 				} else {
@@ -269,6 +382,7 @@ func recordLoop(ctx context.Context, cfg loopConfig, a, b screencaster) error {
 func (r *recorder) recording(sc, other screencaster, file string) {
 	r.active, r.spare, r.file = sc, other, file
 	r.retries = 0
+	r.lockdown = false
 	r.lastSize, r.lastMod, r.lastChange = -1, time.Time{}, time.Now()
 }
 
@@ -295,10 +409,12 @@ func (r *recorder) restart(ctx context.Context) bool {
 		log.Printf("Restart failed: %v", err)
 		r.active = nil
 		r.retries++
+		r.lastErr = err
 		return false
 	}
 	for _, sc := range []screencaster{r.a, r.b} {
 		file, err := sc.Start(r.cfg.template)
+		r.lastErr = err
 		if err == nil {
 			log.Printf("Started recording: %s", file)
 			other := r.b
@@ -312,6 +428,35 @@ func (r *recorder) restart(ctx context.Context) bool {
 	}
 	r.retries++
 	return false
+}
+
+// enterLockdown switches to quiet, slow retries after GNOME Shell refused to
+// record because saving to disk is disabled, logging once.
+func (r *recorder) enterLockdown() {
+	if r.lockdown {
+		return
+	}
+	r.lockdown = true
+	log.Printf("Recording is disabled by this session's lockdown setting (org.gnome.desktop.lockdown disable-save-to-disk); retrying every %s", r.cfg.lockdownRetry)
+}
+
+// startQuiet tries to start a recording on either client without logging
+// (used while saving to disk is disabled, so retries do not flood the log).
+// A save-to-disk refusal is returned at once: the other client would get the
+// same answer. Otherwise it returns the last error.
+func (r *recorder) startQuiet() (screencaster, string, error) {
+	var err error
+	for _, sc := range []screencaster{r.a, r.b} {
+		var file string
+		file, err = sc.Start(r.cfg.template)
+		if err == nil {
+			return sc, file, nil
+		}
+		if isSaveToDiskDisabled(err) {
+			return nil, "", err
+		}
+	}
+	return nil, "", err
 }
 
 // discard stops the active client (errors ignored: the shell has usually

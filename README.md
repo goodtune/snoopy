@@ -90,6 +90,20 @@ sudo systemctl --global enable snoopy.service  # or every user, at next login
 journalctl --user -u snoopy.service -f         # logs
 ```
 
+**Login screens.** A global enable also reaches the display manager's own
+user manager. The unit skips the GDM login screen (`ConditionGroup=!gdm`;
+the unit is simply not started, not failed), and snoopy itself exits with
+status 0 in any display manager's greeter session (logind session class
+`greeter`), before serving or advertising anything. To skip another display
+manager's user in the unit as well, add a drop-in with
+`sudo systemctl --global edit snoopy.service`, or a file such as
+`/etc/systemd/user/snoopy.service.d/greeter.conf`:
+
+```ini
+[Unit]
+ConditionGroup=!sddm
+```
+
 **Tarball** (any distribution):
 
 ```bash
@@ -149,6 +163,16 @@ screencast and withdraws its mDNS record before exiting. A periodic health
 check (`org.freedesktop.DBus.Peer.Ping`) notices a lost session bus; the
 server then exits with status 1 and `Restart=on-failure` starts a fresh
 instance (up to 10 restarts in 5 minutes).
+
+In a display manager's greeter session snoopy logs `Not recording: this is a
+display-manager greeter session` and exits 0, so the unit ends up inactive
+(see [Login screens](#install-the-server)). If GNOME Shell refuses to record
+with `Saving to disk is disabled` (the `org.gnome.desktop.lockdown
+disable-save-to-disk` setting), snoopy does not exit: it logs once, keeps
+its web page and stream up (showing the waiting image or the last recorded
+frame, as while locked), retries every minute and logs again when recording
+starts. Any other failure of the first recording exits with
+status 1.
 
 ## Configuration
 
