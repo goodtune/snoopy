@@ -6,6 +6,16 @@ Documentation=https://github.com/goodtune/snoopy
 # not on the session bus, causing a restart loop.
 PartOf=graphical-session.target
 After=graphical-session.target
+# Never run for the GDM login screen. `systemctl --global enable` enables the
+# unit for every user manager, including the greeter's (gdm-greeter on recent
+# GDM), where GNOME Shell refuses to record (disable-save-to-disk). Match the
+# group, not the user: newer GDM creates dynamic greeter users (several can
+# share the gdm group) with UIDs outside the system range, so
+# ConditionUser=!@system does not match them. A failed condition skips the
+# unit cleanly (inactive, not failed). For other display managers snoopy exits
+# 0 by itself in a greeter session; to skip one here as well, add a drop-in
+# with e.g. ConditionGroup=!sddm (systemctl --global edit snoopy.service).
+ConditionGroup=!gdm
 # Allow up to 10 restarts in 5 minutes so a flapping session bus does not
 # permanently trip the start limit.
 StartLimitIntervalSec=300

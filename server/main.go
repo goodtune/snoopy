@@ -461,7 +461,8 @@ func main() {
 // realMain resolves the configuration, runs the service and returns the
 // process exit code. Keeping os.Exit out of run lets deferred cleanup
 // (stopping the screencast, closing DBus connections, withdrawing the Avahi
-// record) always execute.
+// record) always execute. It returns 0 without running anything in a
+// display-manager greeter session (see inGreeterSession).
 func realMain() int {
 	res, err := resolveConfig(loadManagedFile(managedConfigPath), os.LookupEnv, os.Args[1:], os.Stderr)
 	if errors.Is(err, flag.ErrHelp) {
@@ -483,6 +484,14 @@ func realMain() int {
 		if len(res.ignored) > 0 {
 			log.Printf("Managed mode: ignored user-supplied settings: %s", strings.Join(res.ignored, ", "))
 		}
+	}
+
+	// A display manager's login screen runs its own user manager, which also
+	// starts a globally enabled unit. Exit 0 there (before HTTP, RTSP, Avahi
+	// or recording start) so Restart=on-failure leaves the unit inactive.
+	if inGreeterSession() {
+		log.Print(greeterMessage)
+		return 0
 	}
 
 	err = run(res.opts)
