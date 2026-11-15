@@ -87,6 +87,11 @@ func TestParseConfigErrors(t *testing.T) {
 		{nil, []string{"-plain-http", "-tls-cert", "c", "-tls-key", "k"}},
 		{nil, []string{"-static", "nonsense"}},
 		{nil, []string{"-state-dir", ""}},
+		{nil, []string{"-acme-directory", "http://ca.example.net/dir", "-acme-domains", "hub.example.net"}},
+		{nil, []string{"-acme-directory", "https://ca.example.net/dir", "-acme-domains", "hub.example.net", "-http-port", "0"}},
+		{nil, []string{"-acme-directory", "https://ca.example.net/dir", "-acme-domains", "hub.example.net", "-tls-cert", "c", "-tls-key", "k"}},
+		{nil, []string{"-acme-directory", "https://ca.example.net/dir", "-acme-domains", "10.0.0.1"}},
+		{nil, []string{"-acme-directory", "https://ca.example.net/dir", "-acme-domains", "hub"}},
 		{nil, []string{"extra"}},
 		{nil, []string{"-nope"}},
 	}
@@ -98,6 +103,25 @@ func TestParseConfigErrors(t *testing.T) {
 	_, err := ParseConfig(lookup(nil), []string{"-help"}, io.Discard)
 	if !errors.Is(err, flag.ErrHelp) {
 		t.Fatalf("-help: %v", err)
+	}
+}
+
+func TestParseConfigACMEDomains(t *testing.T) {
+	defer func(h func() (string, error)) { hostname = h }(hostname)
+	dir := "https://vault.example.net:8200/v1/pki/roles/lan/acme/directory"
+
+	hostname = func() (string, error) { return "MacMini.Example.NET.", nil }
+	c, err := ParseConfig(lookup(map[string]string{"SNOOPY_HUB_ACME_DIRECTORY": dir}), nil, io.Discard)
+	if err != nil || len(c.ACMEDomains) != 1 || c.ACMEDomains[0] != "macmini.example.net" {
+		t.Fatalf("default domains = %v, %v", c.ACMEDomains, err)
+	}
+	c, err = ParseConfig(lookup(map[string]string{"SNOOPY_HUB_ACME_DIRECTORY": dir, "SNOOPY_HUB_ACME_DOMAINS": " a.example.net, B.example.net ,"}), nil, io.Discard)
+	if err != nil || strings.Join(c.ACMEDomains, " ") != "a.example.net b.example.net" {
+		t.Fatalf("domains = %v, %v", c.ACMEDomains, err)
+	}
+	hostname = func() (string, error) { return "macmini", nil }
+	if _, err := ParseConfig(lookup(map[string]string{"SNOOPY_HUB_ACME_DIRECTORY": dir}), nil, io.Discard); err == nil || !strings.Contains(err.Error(), "-acme-domains") {
+		t.Fatalf("short host name accepted: %v", err)
 	}
 }
 
