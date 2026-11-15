@@ -4,8 +4,9 @@ version: 2
 # so the project name cannot be inferred.
 project_name: snoopy
 
-# Builds: the recorder (user service) and the attestor (root system service).
-# Both are archived and packaged together (archives and nfpms list both ids).
+# Builds: the recorder (user service), the attestor (root system service) and
+# the hub (system service, dynamic user). All three are archived and packaged
+# together (archives and nfpms list every id).
 builds:
   - id: snoopy
     dir: server
@@ -35,12 +36,23 @@ builds:
     ldflags: *build_ldflags
     targets: *build_targets
 
+  - id: snoopy-hub
+    dir: server
+    main: ./cmd/snoopy-hub
+    binary: snoopy-hub
+    env: *build_env
+    flags: *build_flags
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    ldflags: *build_ldflags
+    targets: *build_targets
+
 # Archive configuration for GitHub releases
 archives:
   - id: default
     ids:
       - snoopy
       - snoopy-attest
+      - snoopy-hub
     formats:
       - tar.gz
     name_template: >-
@@ -64,6 +76,12 @@ archives:
         strip_parent: true
       - src: docs/attestation.md
         strip_parent: true
+      - src: server/snoopy-hub.service
+        strip_parent: true
+      - src: server/hub.conf.example
+        strip_parent: true
+      - src: docs/hub.md
+        strip_parent: true
       - assets/snoopy-500.jpg
 
 # Linux packages (RPM and Debian)
@@ -73,6 +91,7 @@ nfpms:
     ids:
       - snoopy
       - snoopy-attest
+      - snoopy-hub
     # e.g. snoopy-0.1.0-1.x86_64.rpm and snoopy_0.1.0_amd64.deb
     file_name_template: "{{ .ConventionalFileName }}"
     vendor: GoodTune
@@ -83,7 +102,8 @@ nfpms:
       Provides automated screencast recording in segments by interfacing with GNOME Shell's
       screencast D-Bus API, with real-time web streaming via HTTP Server-Sent Events (SSE).
       Includes snoopy-attest, an optional root service that attests to a KProxy network
-      proxy that the screen is being recorded (not enabled by default).
+      proxy that the screen is being recorded, and snoopy-hub, an optional HTTPS web
+      index and viewer for the snoopy desktops on the network (neither enabled by default).
     license: MIT
     section: utils
     formats:
@@ -93,7 +113,7 @@ nfpms:
 
     # Package contents
     contents:
-      # Binaries snoopy and snoopy-attest (included by default in bindir)
+      # Binaries snoopy, snoopy-attest and snoopy-hub (included by default in bindir)
 
       # Systemd user unit for the recorder
       - src: server/snoopy.service
@@ -104,6 +124,12 @@ nfpms:
       # Systemd system unit for the attestor (not enabled by the package)
       - src: server/snoopy-attest.service
         dst: /usr/lib/systemd/system/snoopy-attest.service
+        file_info:
+          mode: 0644
+
+      # Systemd system unit for the hub (not enabled by the package)
+      - src: server/snoopy-hub.service
+        dst: /usr/lib/systemd/system/snoopy-hub.service
         file_info:
           mode: 0644
 
@@ -123,6 +149,18 @@ nfpms:
       # Example attestor configuration (copy to /etc/snoopy/attest.conf)
       - src: server/attest.conf.example
         dst: /usr/share/doc/snoopy/attest.conf.example
+        file_info:
+          mode: 0644
+
+      # Example hub configuration (copy to /etc/snoopy/hub.conf)
+      - src: server/hub.conf.example
+        dst: /usr/share/doc/snoopy/hub.conf.example
+        file_info:
+          mode: 0644
+
+      # Hub admin guide
+      - src: docs/hub.md
+        dst: /usr/share/doc/snoopy/hub.md
         file_info:
           mode: 0644
 
@@ -208,10 +246,15 @@ release:
     ```bash
     wget https://github.com/goodtune/snoopy/releases/download/{{ .Tag }}/snoopy_{{ .Version }}_Linux_x86_64.tar.gz
     tar -xzf snoopy_{{ .Version }}_Linux_x86_64.tar.gz
-    sudo install -m 755 snoopy snoopy-attest /usr/bin/
+    sudo install -m 755 snoopy snoopy-attest snoopy-hub /usr/bin/
     ```
 
     #### Supervised desktops (KProxy attestation)
     The packages also install `snoopy-attest`, a root system service that
     vouches to KProxy that the screen is being recorded. It is not enabled
     automatically; see `/usr/share/doc/snoopy/attestation.md`.
+
+    #### snoopy-hub (web index of the screens on the network)
+    `snoopy-hub` serves an HTTPS index and viewer of every snoopy desktop it
+    finds over mDNS (or lists statically), for an always-on host on the LAN.
+    It is not enabled automatically; see `/usr/share/doc/snoopy/hub.md`.

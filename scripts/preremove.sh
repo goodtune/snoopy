@@ -15,12 +15,14 @@ case "$1" in
         systemctl --global disable snoopy.service >/dev/null 2>&1 || true
         # The attestation system service, if the administrator enabled it.
         systemctl disable --now snoopy-attest.service >/dev/null 2>&1 || true
+        # The hub system service, if the administrator enabled it.
+        systemctl disable --now snoopy-hub.service >/dev/null 2>&1 || true
         echo "Snoopy service has been disabled for all users."
         echo "If the service is running, stop it (and drop a per-user enable) with:"
         echo "  systemctl --user disable --now snoopy.service"
         ;;
     *)
-        # Upgrade: keep the services enabled (and snoopy-attest running).
+        # Upgrade: keep the services enabled (and snoopy-attest/snoopy-hub running).
         ;;
 esac
 exit 0

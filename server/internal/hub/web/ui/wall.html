@@ -1,0 +1,14 @@
+{{template "head" .}}
+<header class="bar wall-bar">
+  <a class="button back" href="/"><span aria-hidden="true">←</span> All screens</a>
+  <h1>{{.Title}}</h1>
+  <p class="summary" id="summary" aria-live="polite">Connecting…</p>
+  <div class="actions">
+    <button type="button" class="button" id="fullscreen" aria-keyshortcuts="f">Fullscreen</button>
+  </div>
+</header>
+<main id="main" class="wall" tabindex="-1">
+  <ul class="wall-grid" id="wall"></ul>
+  <p class="empty wall-empty" id="empty" hidden>No screens online. <a href="/">Back to the index</a>.</p>
+</main>
+{{template "foot" .}}

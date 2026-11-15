@@ -1,0 +1,49 @@
+# snoopy-hub configuration: copy to /etc/snoopy/hub.conf (root-owned, mode
+# 0600 if it holds a password) and restart the service:
+#   sudo install -m 0600 /usr/share/doc/snoopy/hub.conf.example /etc/snoopy/hub.conf
+#   sudo systemctl restart snoopy-hub.service
+#
+# systemd reads this file through EnvironmentFile= in snoopy-hub.service.
+# Every setting is also a command-line flag (SNOOPY_HUB_HTTPS_PORT is
+# -https-port); `snoopy-hub -help` shows the effective defaults. Empty values
+# mean the built-in default. See /usr/share/doc/snoopy/hub.md.
+
+# Bind address for the web listeners.
+#SNOOPY_HUB_ADDR=0.0.0.0
+
+# HTTPS port for the web app.
+#SNOOPY_HUB_HTTPS_PORT=443
+
+# HTTP port. Normally it only redirects to HTTPS; 0 disables it. With
+# SNOOPY_HUB_PLAIN_HTTP=1 the app itself is served here instead.
+#SNOOPY_HUB_HTTP_PORT=80
+
+# Your own certificate (full chain) and key in PEM, e.g. issued by an ACME
+# client. Both or neither; they are re-read when the files change and on
+# SIGHUP (systemctl reload snoopy-hub.service). The service runs as a dynamic
+# user, so the files must be readable by it: see hub.md.
+# Without them the hub generates a self-signed certificate in
+# SNOOPY_HUB_STATE_DIR and logs its SHA-256 fingerprint.
+#SNOOPY_HUB_TLS_CERT=/etc/snoopy/hub-cert.pem
+#SNOOPY_HUB_TLS_KEY=/etc/snoopy/hub-key.pem
+
+# Serve the app over plain HTTP on SNOOPY_HUB_HTTP_PORT, for a reverse proxy
+# that terminates TLS (and ideally does the authentication). 1/true/yes or
+# 0/false/no.
+#SNOOPY_HUB_PLAIN_HTTP=0
+
+# HTTP Basic authentication for every page, image and stream. Both or
+# neither. Without them anyone who can reach the hub can watch every screen.
+#SNOOPY_HUB_USER=viewer
+#SNOOPY_HUB_PASSWORD=change-me
+
+# Desktops to list without mDNS (other subnets, VPNs): comma-separated
+# name=host[:port][;rtsp=PORT]. The port defaults to 8900; rtsp= adds an RTSP
+# link to rtsp://host:PORT/.
+#SNOOPY_HUB_STATIC=alice=alice-pc.example.net:8900;rtsp=8554,bob=10.0.5.12
+
+# How often each desktop is health-checked.
+#SNOOPY_HUB_PROBE_INTERVAL=15s
+
+# Where the self-signed certificate is kept (the unit's StateDirectory).
+#SNOOPY_HUB_STATE_DIR=/var/lib/snoopy-hub

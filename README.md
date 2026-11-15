@@ -17,6 +17,9 @@ It has two parts:
   finds on the local network ([Watch in VLC](#watch-in-vlc)).
 - **Mobile app** (`mobile/`, Flutter): discovers Snoopy servers on the LAN and
   shows the live stream, with on-device history, cleanup and save-to-gallery.
+- **Hub** (`snoopy-hub`, optional): a web app on the usual HTTPS port that
+  lists every Snoopy desktop on the network and shows their screens, one at a
+  time or several together ([snoopy-hub](#web-index-of-all-screens-snoopy-hub)).
 
 Typical uses: activity logs, monitoring a kiosk or unattended machine, or
 capturing long-running screen activity without manual effort.
@@ -79,8 +82,11 @@ The packages install `/usr/bin/snoopy`, the user unit
 `/usr/share/doc/snoopy/snoopy.conf.example`, and recommend `ffmpeg`. They
 also install the optional [snoopy-attest](#supervised-desktops-snoopy-attest)
 attestor (`/usr/bin/snoopy-attest`, its system unit, `attest.conf.example`
-and `attestation.md` under `/usr/share/doc/snoopy/`). They do
-**not** enable either service; that is the administrator's or user's choice. The
+and `attestation.md` under `/usr/share/doc/snoopy/`) and the optional
+[snoopy-hub](#web-index-of-all-screens-snoopy-hub) (`/usr/bin/snoopy-hub`,
+`/usr/lib/systemd/system/snoopy-hub.service`, `hub.conf.example` and
+`hub.md` under `/usr/share/doc/snoopy/`). They do
+**not** enable any of these services; that is the administrator's or user's choice. The
 unit is `WantedBy=` and `PartOf=graphical-session.target`, so once enabled it
 starts and stops with your GNOME session (not on SSH or TTY logins).
 
@@ -302,6 +308,28 @@ snoopy.service` or a new login). See [docs/attestation.md](docs/attestation.md)
 for the threat model and its limits, the checks, the heartbeat protocol and
 the setup runbook.
 
+## Web index of all screens: snoopy-hub
+
+`snoopy-hub` is an optional system service for an always-on Linux host on the
+same LAN (with avahi-daemon). It finds the desktops whose snoopy is
+[exposed on the LAN](#expose-on-the-lan) over mDNS (or from
+`SNOOPY_HUB_STATIC`), and serves over HTTPS on port 443 an index of live
+tiles, a full-window view of one screen, a bookmarkable wall of a chosen set
+of screens, and `rtsp://` links for desktops that export the
+[RTSP stream](#watch-in-vlc). Browsers only talk to the hub, which keeps a
+single connection to each desktop. It uses a self-signed certificate unless
+you give it one (or run it behind a reverse proxy), and it aggregates every
+screen it can find: set `SNOOPY_HUB_USER`/`SNOOPY_HUB_PASSWORD` in
+`/etc/snoopy/hub.conf`.
+
+```bash
+sudo install -m 0600 /usr/share/doc/snoopy/hub.conf.example /etc/snoopy/hub.conf
+sudo systemctl enable --now snoopy-hub.service   # then open https://<host>/
+```
+
+See [docs/hub.md](docs/hub.md) for configuration, TLS options, firewall
+ports, security notes and the hub's API.
+
 ## Web interface and API
 
 Open `http://<host>:8900/` in a browser for a live view that updates over SSE
@@ -362,9 +390,11 @@ The app identifier is `network.touchtechnology.snoopy`.
 Repository layout:
 
 ```
-server/     Go server (module root: go.mod, main.go, snoopy.service)
-            and the attestor (cmd/snoopy-attest, internal/attest)
-docs/       attestation.md (snoopy-attest design and runbook, packaged)
+server/     Go server (module root: go.mod, main.go, snoopy.service),
+            the attestor (cmd/snoopy-attest, internal/attest) and the hub
+            (cmd/snoopy-hub, internal/hub)
+docs/       attestation.md (snoopy-attest design and runbook) and hub.md
+            (snoopy-hub guide), both packaged
 mobile/     Flutter app (android, ios, macos)
 scripts/    Package install/remove scripts used by GoReleaser
 assets/     Logo and shared images (Git LFS)
