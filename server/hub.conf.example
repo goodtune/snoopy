@@ -27,6 +27,20 @@
 #SNOOPY_HUB_TLS_CERT=/etc/snoopy/hub-cert.pem
 #SNOOPY_HUB_TLS_KEY=/etc/snoopy/hub-key.pem
 
+# Obtain and renew the certificate from an ACME server instead (RFC 8555),
+# e.g. a HashiCorp Vault PKI role. Only http-01 challenges are used: the CA
+# connects to port 80 of every name, so keep SNOOPY_HUB_HTTP_PORT=80 (or
+# forward port 80 to it). The account, certificate and key are kept in
+# SNOOPY_HUB_STATE_DIR/acme; until the first certificate is issued the hub
+# serves the self-signed one. The CA's own certificate must be trusted by
+# the system. Cannot be combined with SNOOPY_HUB_TLS_CERT.
+#SNOOPY_HUB_ACME_DIRECTORY=https://vault.example.net:8200/v1/pki/roles/web/acme/directory
+# DNS names for the certificate, comma-separated (default: the host name,
+# if it is fully qualified).
+#SNOOPY_HUB_ACME_DOMAINS=hub.example.net
+# Contact e-mail for the ACME account (optional).
+#SNOOPY_HUB_ACME_EMAIL=
+
 # Serve the app over plain HTTP on SNOOPY_HUB_HTTP_PORT, for a reverse proxy
 # that terminates TLS (and ideally does the authentication). 1/true/yes or
 # 0/false/no.

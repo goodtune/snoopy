@@ -9,6 +9,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -31,6 +34,9 @@ type Config struct {
 	TLSCert       string
 	TLSKey        string
 	PlainHTTP     bool
+	ACMEDirectory string
+	ACMEDomains   []string
+	ACMEEmail     string
 	User          string
 	Password      string
 	Static        []registry.StaticEntry
@@ -132,12 +138,15 @@ func ParseConfig(lookupEnv func(string) (string, bool), args []string, out io.Wr
 	fs := flag.NewFlagSet("snoopy-hub", flag.ContinueOnError)
 	fs.SetOutput(out)
 	var c Config
-	var static string
+	var static, acmeDomains string
 	fs.StringVar(&c.Addr, "addr", env.string("addr", "0.0.0.0"), usage("addr", "Bind address for the web listeners"))
 	fs.IntVar(&c.HTTPSPort, "https-port", env.int("https-port", 443), usage("https-port", "HTTPS port"))
 	fs.IntVar(&c.HTTPPort, "http-port", env.int("http-port", 80), usage("http-port", "HTTP port: redirects to HTTPS (0 disables); with -plain-http it serves the app"))
 	fs.StringVar(&c.TLSCert, "tls-cert", env.string("tls-cert", ""), usage("tls-cert", "PEM certificate chain file (with -tls-key; reloaded on change or SIGHUP). Empty: a self-signed certificate in -state-dir"))
 	fs.StringVar(&c.TLSKey, "tls-key", env.string("tls-key", ""), usage("tls-key", "PEM private key file for -tls-cert"))
+	fs.StringVar(&c.ACMEDirectory, "acme-directory", env.string("acme-directory", ""), usage("acme-directory", "ACME directory URL to obtain and renew the certificate from (http-01 on -http-port, which the CA reaches on port 80). Empty: no ACME"))
+	fs.StringVar(&acmeDomains, "acme-domains", env.string("acme-domains", ""), usage("acme-domains", "Comma-separated DNS names for the ACME certificate. Empty: the host name, if it is fully qualified"))
+	fs.StringVar(&c.ACMEEmail, "acme-email", env.string("acme-email", ""), usage("acme-email", "Contact e-mail for the ACME account (optional)"))
 	fs.BoolVar(&c.PlainHTTP, "plain-http", env.bool("plain-http", false), usage("plain-http", "Serve the app over plain HTTP on -http-port, for a reverse proxy that terminates TLS"))
 	fs.StringVar(&c.User, "user", env.string("user", ""), usage("user", "HTTP Basic user name (with -password); empty: no authentication"))
 	// The password's default is applied after parsing so -help never shows it.
@@ -145,7 +154,7 @@ func ParseConfig(lookupEnv func(string) (string, bool), args []string, out io.Wr
 	envPassword := env.string("password", "")
 	fs.StringVar(&static, "static", env.string("static", ""), usage("static", "Desktops to list without mDNS: name=host[:port][;rtsp=PORT],..."))
 	fs.DurationVar(&c.ProbeInterval, "probe-interval", env.duration("probe-interval", 15*time.Second), usage("probe-interval", "Interval between health checks of each desktop"))
-	fs.StringVar(&c.StateDir, "state-dir", env.string("state-dir", DefaultStateDir), usage("state-dir", "Directory for the generated self-signed certificate"))
+	fs.StringVar(&c.StateDir, "state-dir", env.string("state-dir", DefaultStateDir), usage("state-dir", "Directory for the generated self-signed certificate and the ACME account and certificate"))
 	fs.BoolVar(&c.ShowVersion, "version", false, "Print version information and exit")
 
 	if err := fs.Parse(args); err != nil {
@@ -167,7 +176,26 @@ func ParseConfig(lookupEnv func(string) (string, bool), args []string, out io.Wr
 	if c.Static, err = registry.ParseStatic(static); err != nil {
 		return c, fmt.Errorf("invalid -static: %w", err)
 	}
+	c.ACMEDomains = splitList(acmeDomains)
+	if c.ACMEDirectory != "" && len(c.ACMEDomains) == 0 {
+		if h, err := hostname(); err == nil && strings.Contains(strings.Trim(h, "."), ".") {
+			c.ACMEDomains = []string{strings.ToLower(strings.Trim(h, "."))}
+		}
+	}
 	return c, c.validate()
+}
+
+// hostname is os.Hostname, replaceable in tests.
+var hostname = os.Hostname
+
+func splitList(s string) []string {
+	var out []string
+	for _, f := range strings.Split(s, ",") {
+		if f = strings.ToLower(strings.TrimSpace(f)); f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 func (c Config) validate() error {
@@ -196,6 +224,25 @@ func (c Config) validate() error {
 	if (c.TLSCert == "") != (c.TLSKey == "") {
 		errs = append(errs, "-tls-cert and -tls-key must be set together")
 	}
+	if c.ACMEDirectory != "" {
+		if u, err := url.Parse(c.ACMEDirectory); err != nil || u.Scheme != "https" || u.Host == "" {
+			errs = append(errs, "-acme-directory must be an https:// URL")
+		}
+		if c.PlainHTTP || c.TLSCert != "" {
+			errs = append(errs, "-acme-directory cannot be used with -plain-http or -tls-cert")
+		}
+		if c.HTTPPort == 0 {
+			errs = append(errs, "-acme-directory needs -http-port for http-01 challenges")
+		}
+		if len(c.ACMEDomains) == 0 {
+			errs = append(errs, "-acme-domains is required when the host name is not fully qualified")
+		}
+		for _, d := range c.ACMEDomains {
+			if net.ParseIP(d) != nil || !registry.ValidHost(d) || !strings.Contains(d, ".") {
+				errs = append(errs, fmt.Sprintf("-acme-domains: %q is not a fully qualified DNS name", d))
+			}
+		}
+	}
 	if (c.User == "") != (c.Password == "") {
 		errs = append(errs, "-user and -password must be set together")
 	}
@@ -206,7 +253,7 @@ func (c Config) validate() error {
 		errs = append(errs, "-probe-interval must be at least 1s")
 	}
 	if !c.PlainHTTP && c.TLSCert == "" && c.StateDir == "" {
-		errs = append(errs, "-state-dir must not be empty when generating a certificate")
+		errs = append(errs, "-state-dir must not be empty when generating or requesting a certificate")
 	}
 	if len(errs) > 0 {
 		return errors.New(strings.Join(errs, "; "))

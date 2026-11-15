@@ -91,12 +91,15 @@ unset; invalid values exit with status 2.
 | `-http-port` | `SNOOPY_HUB_HTTP_PORT` | `80` | HTTP port: redirects to HTTPS; `0` disables it. With `-plain-http` it serves the app |
 | `-tls-cert` | `SNOOPY_HUB_TLS_CERT` | | PEM certificate chain; with `-tls-key`. Reloaded when the files change and on SIGHUP (`systemctl reload snoopy-hub`). Empty: self-signed certificate |
 | `-tls-key` | `SNOOPY_HUB_TLS_KEY` | | PEM private key for `-tls-cert` |
+| `-acme-directory` | `SNOOPY_HUB_ACME_DIRECTORY` | | ACME directory URL (`https://`) to obtain and renew the certificate from, with http-01 challenges on `-http-port`. Not with `-tls-cert` or `-plain-http`. See [TLS](#tls) |
+| `-acme-domains` | `SNOOPY_HUB_ACME_DOMAINS` | host name | Comma-separated DNS names for the ACME certificate; defaults to the host name when it is fully qualified |
+| `-acme-email` | `SNOOPY_HUB_ACME_EMAIL` | | Contact e-mail for the ACME account (optional) |
 | `-plain-http` | `SNOOPY_HUB_PLAIN_HTTP` | `false` | Serve the app over plain HTTP on `-http-port`, behind a TLS-terminating reverse proxy |
 | `-user` | `SNOOPY_HUB_USER` | | HTTP Basic user name; with `-password`. Empty: no authentication (logged as a warning) |
 | `-password` | `SNOOPY_HUB_PASSWORD` | | HTTP Basic password; never logged or shown by `-help` (prefer the variable: command lines are visible to local users) |
 | `-static` | `SNOOPY_HUB_STATIC` | | Desktops to list without mDNS: `name=host[:port][;rtsp=PORT],...` (port 8900 by default; IPv6 in brackets) |
 | `-probe-interval` | `SNOOPY_HUB_PROBE_INTERVAL` | `15s` | Health-check interval per desktop (minimum `1s`) |
-| `-state-dir` | `SNOOPY_HUB_STATE_DIR` | `/var/lib/snoopy-hub` | Where the self-signed certificate is kept |
+| `-state-dir` | `SNOOPY_HUB_STATE_DIR` | `/var/lib/snoopy-hub` | Where the self-signed certificate, and the ACME account and certificate (`acme/`), are kept |
 | `-version` | | | Print version information and exit |
 
 Exit status: `0` on SIGINT/SIGTERM, `1` on runtime errors (for example a port
@@ -115,8 +118,8 @@ fingerprint in the log (or `sudo openssl x509 -in
 browser shows, then accept it or import `cert.pem` into the viewers' trust
 stores. HSTS is not sent with a self-signed certificate.
 
-**Your own certificate** (internal CA, or ACME, e.g. certbot or lego with a
-DNS challenge for a LAN-only name). The service runs as a dynamic user, which
+**Your own certificate** (internal CA, or an external ACME client, e.g.
+certbot or lego with a DNS challenge for a LAN-only name). The service runs as a dynamic user, which
 cannot read a root-only key, so hand the files to it with systemd
 credentials (`sudo systemctl edit snoopy-hub.service`, systemd 250 or later):
 
@@ -132,6 +135,29 @@ renewal (certbot: `--deploy-hook "systemctl restart snoopy-hub"`). Files the
 service can read directly are instead reloaded when they change or on
 `systemctl reload snoopy-hub`. With your own certificate the hub sends
 `Strict-Transport-Security`.
+
+**ACME (built in).** Set `SNOOPY_HUB_ACME_DIRECTORY` to the directory URL of
+an ACME server the viewers' systems already trust, such as a HashiCorp Vault
+PKI role with ACME enabled:
+
+```sh
+SNOOPY_HUB_ACME_DIRECTORY=https://vault.example.net:8200/v1/pki/roles/web/acme/directory
+SNOOPY_HUB_ACME_DOMAINS=hub.example.net
+```
+
+The hub requests one certificate for all the names and answers the CA's
+**http-01** challenges on `-http-port`. The CA always connects to port 80 of
+each name, so leave `SNOOPY_HUB_HTTP_PORT=80` (or forward port 80 to it) and
+allow port 80 through the firewall. The HTTPS port can be anything. Other
+challenge types are not used: tls-alpn-01 would need the HTTPS port to be
+443. The certificate is renewed two thirds into its validity (a 7-day
+certificate after about 4.7 days, a 90-day one after 60 days). A failed
+request is logged and retried after 1 minute, then doubling up to 1 hour.
+The account key, certificate and key are kept in `/var/lib/snoopy-hub/acme/`
+and reused across restarts. Until the first certificate is issued (or if the
+CA cannot be reached and there is none yet), the hub serves the self-signed
+certificate. The hub must trust the CA's own TLS certificate through the
+system trust store. The hub sends `Strict-Transport-Security` in this mode.
 
 **Reverse proxy.** To put the hub behind nginx, Caddy, Traefik or an SSO
 proxy, set `SNOOPY_HUB_PLAIN_HTTP=1`, `SNOOPY_HUB_ADDR=127.0.0.1` and

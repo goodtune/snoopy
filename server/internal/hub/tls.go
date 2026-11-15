@@ -52,6 +52,13 @@ func (c *certSource) get(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 	return c.cert, nil
 }
 
+// set replaces the certificate (e.g. a renewed ACME certificate).
+func (c *certSource) set(cert *tls.Certificate) {
+	c.mu.Lock()
+	c.cert = cert
+	c.mu.Unlock()
+}
+
 // fileModTime is the newest modification time of the certificate and key.
 func (c *certSource) fileModTime() time.Time {
 	var t time.Time

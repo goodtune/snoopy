@@ -8,11 +8,13 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"snoopy/internal/acmecert"
 	"snoopy/internal/hub/discovery"
 	"snoopy/internal/hub/registry"
 	"snoopy/internal/hub/upstream"
@@ -90,9 +92,11 @@ func Run(ctx context.Context, c Config, o Options) error {
 	// Web listeners.
 	appHandler := web.New(web.Options{
 		Registry: reg, Frames: frames, User: c.User, Password: c.Password,
-		HSTS: !c.PlainHTTP && c.TLSCert != "",
+		HSTS: !c.PlainHTTP && (c.TLSCert != "" || c.ACMEDirectory != ""),
 	})
 	var appSrv, redirSrv *http.Server
+	var issuer *acmecert.Issuer
+	var src *certSource // nil with -plain-http
 	var appLn, redirLn net.Listener
 	var err error
 
@@ -121,7 +125,20 @@ func Run(ctx context.Context, c Config, o Options) error {
 		appSrv = newServer(appHandler)
 		logf("Serving the hub over plain HTTP on %s (expecting a TLS-terminating reverse proxy)", appLn.Addr())
 	} else {
-		var src *certSource
+		selfSigned := func() (*certSource, error) {
+			names, ips := localNames()
+			cert, created, err := loadOrCreateSelfSigned(c.StateDir, names, ips, time.Now())
+			if err != nil {
+				return nil, fmt.Errorf("self-signed certificate in %s: %w", c.StateDir, err)
+			}
+			verb := "Using"
+			if created {
+				verb = "Generated"
+			}
+			logf("%s self-signed TLS certificate %s for %s (SHA-256 fingerprint %s); browsers will warn until you trust it, see docs/hub.md",
+				verb, c.StateDir+"/"+selfCertFile, strings.Join(names, ", "), Fingerprint(cert.Certificate[0]))
+			return &certSource{cert: cert}, nil
+		}
 		if c.TLSCert != "" {
 			src, err = newFileCertSource(c.TLSCert, c.TLSKey, logf)
 			if err != nil {
@@ -133,19 +150,30 @@ func Run(ctx context.Context, c Config, o Options) error {
 			}
 			goRun(func() { src.watch(ctx, interval, o.Hup) })
 			logf("Using TLS certificate %s (SHA-256 %s)", c.TLSCert, Fingerprint(src.cert.Certificate[0]))
-		} else {
-			names, ips := localNames()
-			cert, created, err := loadOrCreateSelfSigned(c.StateDir, names, ips, time.Now())
+		} else if c.ACMEDirectory != "" {
+			issuer, err = acmecert.New(acmecert.Config{
+				DirectoryURL: c.ACMEDirectory, Domains: c.ACMEDomains, Email: c.ACMEEmail,
+				Dir: filepath.Join(c.StateDir, "acme"), Logf: logf,
+			})
 			if err != nil {
-				return fmt.Errorf("self-signed certificate in %s: %w", c.StateDir, err)
+				return err
 			}
-			src = &certSource{cert: cert}
-			verb := "Using"
-			if created {
-				verb = "Generated"
+			if cert := issuer.Certificate(); cert != nil {
+				src = &certSource{cert: cert}
+				logf("Using ACME certificate for %s (SHA-256 %s)", strings.Join(c.ACMEDomains, ", "), Fingerprint(cert.Certificate[0]))
+			} else {
+				logf("No ACME certificate for %s yet: serving a self-signed one until %s issues it", strings.Join(c.ACMEDomains, ", "), c.ACMEDirectory)
+				if src, err = selfSigned(); err != nil {
+					return err
+				}
 			}
-			logf("%s self-signed TLS certificate %s for %s (SHA-256 fingerprint %s); browsers will warn until you trust it, see docs/hub.md",
-				verb, c.StateDir+"/"+selfCertFile, strings.Join(names, ", "), Fingerprint(cert.Certificate[0]))
+			if c.HTTPPort != 80 {
+				logf("Warning: ACME http-01 challenges are answered on port %d, but the CA connects to port 80: forward port 80 here", c.HTTPPort)
+			}
+		} else {
+			if src, err = selfSigned(); err != nil {
+				return err
+			}
 		}
 		ln, err := net.Listen("tcp", net.JoinHostPort(c.Addr, strconv.Itoa(c.HTTPSPort)))
 		if err != nil {
@@ -161,7 +189,11 @@ func Run(ctx context.Context, c Config, o Options) error {
 				_ = ln.Close()
 				return err
 			}
-			redirSrv = newServer(RedirectHandler(c.HTTPSPort))
+			redir := RedirectHandler(c.HTTPSPort)
+			if issuer != nil {
+				redir = issuer.HTTPHandler(redir)
+			}
+			redirSrv = newServer(redir)
 			logf("Redirecting HTTP on %s to HTTPS", redirLn.Addr())
 		}
 	}
@@ -178,6 +210,10 @@ func Run(ctx context.Context, c Config, o Options) error {
 	}()
 	if redirSrv != nil {
 		go func() { errc <- redirSrv.Serve(redirLn) }()
+	}
+	if issuer != nil {
+		// After the HTTP listener is serving, so challenges can be answered.
+		goRun(func() { issuer.Run(ctx, src.set) })
 	}
 	if o.Ready != nil {
 		var ra net.Addr
