@@ -11,6 +11,7 @@ import (
 	"image/color"
 	"image/draw"
 	"image/jpeg"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -30,6 +31,8 @@ import (
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/basicfont"
 	"golang.org/x/image/math/fixed"
+
+	"snoopy/internal/webmtail"
 )
 
 const (
@@ -690,27 +693,9 @@ func startScreenCaptureLoop(ctx context.Context, cache *ImageCache, broadcaster 
 		// Create temp file for frame extraction
 		tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("snoopy-frame-%d.jpg", time.Now().UnixNano()))
 
-		// Extract a frame from the video using ffmpeg
-		// Use -sseof to seek from the end, getting a recent frame
-		cmd := exec.Command("ffmpeg",
-			"-loglevel", "error", // Only show errors
-			"-sseof", "-3", // Seek to 3 seconds before end of file
-			"-i", videoFile,
-			"-frames:v", "1", // Extract 1 frame
-			"-q:v", "2", // JPEG quality (2 is high quality)
-			"-y", // Overwrite output file
-			tmpFile,
-		)
-
-		// Capture stderr for error messages
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-
-		if err := cmd.Run(); err != nil {
+		if err := extractFrame(ctx, videoFile, tmpFile); err != nil {
 			log.Printf("Failed to extract frame from %s: %v", filepath.Base(videoFile), err)
-			if stderr.Len() > 0 {
-				log.Printf("ffmpeg error: %s", stderr.String())
-			}
+			_ = os.Remove(tmpFile)
 			continue
 		}
 
@@ -738,6 +723,61 @@ func startScreenCaptureLoop(ctx context.Context, cache *ImageCache, broadcaster 
 		hub.Publish(jpegData)
 		log.Printf("Captured and broadcast image: %s", filename)
 	}
+}
+
+// maxFrameTail bounds how far back from the end of a WebM recording
+// extractFrame looks for a keyframe.
+const maxFrameTail = 128 << 20
+
+// extractFrame writes the newest frame of videoFile to outFile as a JPEG.
+//
+// The current segment is still being written, so it has no duration and
+// ffmpeg cannot seek from its end (-sseof is ignored with a warning and the
+// first frame of the segment comes out, every time). For WebM, ffmpeg is
+// instead fed the file's header plus its data from the newest keyframe
+// cluster (webmtail) and keeps the last frame it decodes. Other formats,
+// and a WebM without a complete keyframe cluster yet, use -sseof, which
+// works on finished files.
+func extractFrame(ctx context.Context, videoFile, outFile string) error {
+	if ext := strings.ToLower(filepath.Ext(videoFile)); ext == ".webm" || ext == ".mkv" {
+		tail, err := webmtail.Read(videoFile, maxFrameTail)
+		if err == nil {
+			return runFFmpeg(ctx, bytes.NewReader(tail),
+				"-loglevel", "error",
+				"-f", "matroska", "-i", "pipe:0",
+				"-update", "1", // keep overwriting: the last decoded frame remains
+				"-q:v", "2",
+				"-y", outFile,
+			)
+		}
+		log.Printf("Reading the end of %s: %v; seeking from the end instead", filepath.Base(videoFile), err)
+	}
+	return runFFmpeg(ctx, nil,
+		"-loglevel", "error", // Only show errors
+		"-sseof", "-3", // Seek to 3 seconds before end of file
+		"-i", videoFile,
+		"-frames:v", "1", // Extract 1 frame
+		"-q:v", "2", // JPEG quality (2 is high quality)
+		"-y", // Overwrite output file
+		outFile,
+	)
+}
+
+// runFFmpeg runs ffmpeg with stdin (may be nil) and returns its error
+// output with any failure.
+func runFFmpeg(ctx context.Context, stdin io.Reader, args ...string) error {
+	cmd := exec.CommandContext(ctx, "ffmpeg",
+		args...)
+	cmd.Stdin = stdin
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return fmt.Errorf("%w: %s", err, msg)
+		}
+		return err
+	}
+	return nil
 }
 
 func findMostRecentVideo(dir string) (string, error) {
