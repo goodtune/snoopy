@@ -172,7 +172,13 @@ instance (up to 10 restarts in 5 minutes).
 
 In a display manager's greeter session snoopy logs `Not recording: this is a
 display-manager greeter session` and exits 0, so the unit ends up inactive
-(see [Login screens](#install-the-server)). If GNOME Shell refuses to record
+(see [Login screens](#install-the-server)). Likewise, when the user has only
+text sessions (a virtual console or SSH, logind type `tty`), there is no
+GNOME Shell to record: the unit is `WantedBy=graphical-session.target` and
+is not started for them, and if it is started explicitly (for example by
+configuration management) snoopy logs `Not recording: this user has only
+text sessions` and exits 0 instead of failing and restarting. It starts with
+the user's next graphical session. If GNOME Shell refuses to record
 with `Saving to disk is disabled` (the `org.gnome.desktop.lockdown
 disable-save-to-disk` setting), snoopy does not exit: it logs once, keeps
 its web page and stream up (showing the waiting image or the last recorded

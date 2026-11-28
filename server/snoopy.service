@@ -3,7 +3,8 @@ Description=Snoopy - Continuous screen recording with web streaming
 Documentation=https://github.com/goodtune/snoopy
 # Only run inside a graphical (GNOME) session, and stop with it. Binding to
 # default.target would also start it on SSH/TTY logins where GNOME Shell is
-# not on the session bus, causing a restart loop.
+# not on the session bus, causing a restart loop. If the unit is started
+# explicitly for a user with only text sessions, snoopy exits 0 by itself.
 PartOf=graphical-session.target
 After=graphical-session.target
 # Never run for the GDM login screen. `systemctl --global enable` enables the
