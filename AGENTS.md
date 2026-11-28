@@ -19,7 +19,7 @@ duplicate README content here.
 | `server/config.go` | Flags and their `SNOOPY_*` env defaults (`envDefaults`, incl. `bool`), managed mode (`loadManagedFile`, pure `resolveConfig`) |
 | `server/record.go` | Screencast loop (`recordLoop`, `rotate`, `screencaster`), restart/backoff and stall detection |
 | `server/events.go` | Session events (`sessionEvents`): lock/unlock, resume, screencast `Error`, from D-Bus signals |
-| `server/greeter.go` | Greeter-session check at startup (pure `greeterOnly`/`isGreeterSession` over `userSessionSource`, backed by `internal/attest/logind`) |
+| `server/greeter.go` | Session check at startup: greeter-only or text-only (`tty`) sessions mean exit 0 (pure `greeterOnly`/`textOnly`/`skipReason` over `userSessionSource`, backed by `internal/attest/logind`) |
 | `server/snoopy.service` | systemd **user** unit, installed to `/usr/lib/systemd/user/`; reads optional `EnvironmentFile`s `/etc/snoopy/snoopy.conf` and `%h/.config/snoopy/snoopy.conf` |
 | `server/snoopy.conf.example` | Commented `SNOOPY_*` settings; packaged to `/usr/share/doc/snoopy/` and at the tarball root |
 | `server/internal/envfile` | Parser for systemd `EnvironmentFile=` syntax, shared by the recorder (managed file) and the attestor (`attest.conf`, recorder config) |
@@ -111,14 +111,16 @@ CI mirrors these commands; keep them passing locally before pushing.
   timeout. Output is damage driven (with a 1 s pipewire keepalive) and
   buffered, so do not make it aggressive. The file stat is injectable
   (`loopConfig.stat`).
-- **Exit codes**: `realMain` returns 0 on SIGINT/SIGTERM and in a
-  display-manager greeter session (see below), 1 on errors
+- **Exit codes**: `realMain` returns 0 on SIGINT/SIGTERM, in a
+  display-manager greeter session and for a user with only text sessions
+  (see below), 1 on errors
   (including D-Bus loss, after stopping the screencast and withdrawing the
   Avahi record via deferred cleanup) and 2 on invalid flags or `SNOOPY_*`
   values. Do not call
   `os.Exit` or `log.Fatal` inside `run`; it would skip the cleanup.
   `Restart=on-failure` in the user unit relies on the status-1 exit, so
-  anything that must not restart (greeter, lockdown) is never status 1.
+  anything that must not restart (greeter, text-only, lockdown) is never
+  status 1.
 - **Login screens** (issue #16), three layers; keep all of them:
   1. The unit has `ConditionGroup=!gdm`: GDM's greeter users (dynamic
      `gdm-greeter*` users on newer GDM, UIDs outside the system range, so
@@ -133,7 +135,12 @@ CI mirrors these commands; keep them passing locally before pushing.
      The decision is the pure `greeterOnly` over `userSessionSource`, tested
      with fakes. Any logind error or no sessions means run normally (one log
      line at most). Only `greeter` triggers the skip, not `lock-screen` or
-     the `user*` classes.
+     the `user*` classes. The same query also skips a uid whose interactive sessions are
+     all logind type `tty` (console/SSH; issue #22): the unit is
+     `WantedBy=graphical-session.target`, but an explicit `systemctl --user
+     start` would otherwise fail activating `org.gnome.Shell.Screencast`
+     and restart forever. Only `tty` counts as text; `unspecified` or an
+     empty type runs (`textOnly`, `skipReason`).
   3. GNOME Shell's `Saving to disk is disabled` refusal
      (`org.gnome.Shell.Screencast.Error.SaveToDiskDisabled`, matched by
      `isSaveToDiskDisabled`; sources cited in `record.go`) is a waiting

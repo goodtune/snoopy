@@ -48,15 +48,58 @@ func TestIsGreeterSession(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			src := &fakeSessionSource{sessions: tt.sessions, err: tt.err}
-			got, err := isGreeterSession(src, 60578)
-			if got != tt.want {
-				t.Errorf("isGreeterSession = %v, want %v", got, tt.want)
+			reason, err := skipReason(src, 60578)
+			if got := reason == greeterMessage; got != tt.want {
+				t.Errorf("skipReason = %q, want greeter skip %v", reason, tt.want)
 			}
 			if (err != nil) != (tt.err != nil) {
 				t.Errorf("err = %v, want %v", err, tt.err)
 			}
 			if src.gotUID != 60578 {
 				t.Errorf("queried uid %d, want 60578", src.gotUID)
+			}
+		})
+	}
+}
+
+func typed(id, class, typ string) logind.Session {
+	return logind.Session{ID: id, UID: 60578, Class: class, Type: typ}
+}
+
+func TestSkipReason(t *testing.T) {
+	tests := []struct {
+		name     string
+		sessions []logind.Session
+		err      error
+		want     string
+	}{
+		// #22: a text console (or SSH) is the only session, so GNOME Shell's
+		// screencast service cannot be activated; exit 0 instead of looping.
+		{"tty console only", []logind.Session{typed("3", "user", "tty"), typed("1", "manager", "unspecified")}, nil, textOnlyMessage},
+		{"tty console and ssh", []logind.Session{typed("3", "user", "tty"), typed("4", "user", "tty")}, nil, textOnlyMessage},
+		{"tty plus background", []logind.Session{typed("3", "user", "tty"), typed("5", "background", "unspecified")}, nil, textOnlyMessage},
+		// Any graphical (or unknown-type) session keeps snoopy running.
+		{"wayland", []logind.Session{typed("2", "user", "wayland")}, nil, ""},
+		{"x11", []logind.Session{typed("2", "user", "x11")}, nil, ""},
+		{"wayland and tty", []logind.Session{typed("2", "user", "wayland"), typed("3", "user", "tty")}, nil, ""},
+		{"unspecified type", []logind.Session{typed("2", "user", "unspecified")}, nil, ""},
+		{"empty type", []logind.Session{typed("2", "user", "")}, nil, ""},
+		{"locked wayland", []logind.Session{typed("2", "lock-screen", "wayland")}, nil, ""},
+		// The greeter rule is unchanged.
+		{"greeter", []logind.Session{typed("c1", "greeter", "wayland")}, nil, greeterMessage},
+		// Without evidence snoopy runs.
+		{"no sessions", nil, nil, ""},
+		{"manager only", []logind.Session{typed("1", "manager", "unspecified")}, nil, ""},
+		{"logind error", []logind.Session{typed("3", "user", "tty")}, errors.New("no system bus"), ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := skipReason(&fakeSessionSource{sessions: tt.sessions, err: tt.err}, 60578)
+			if got != tt.want {
+				t.Errorf("skipReason = %q, want %q", got, tt.want)
+			}
+			if (err != nil) != (tt.err != nil) {
+				t.Errorf("err = %v, want %v", err, tt.err)
 			}
 		})
 	}

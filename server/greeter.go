@@ -53,34 +53,67 @@ func greeterOnly(sessions []logind.Session) bool {
 	return n > 0
 }
 
-// isGreeterSession asks src about uid's sessions. A lookup error is returned
-// for logging only; callers must then run normally.
-func isGreeterSession(src userSessionSource, uid uint32) (bool, error) {
-	sessions, err := src.UserSessions(uid)
-	if err != nil {
-		return false, err
+// textOnly reports whether uid's interactive sessions are all text
+// sessions (logind Type "tty": a virtual console or SSH). GNOME Shell is not
+// on the session bus then, so its screencast service cannot be activated
+// and the recorder would fail and be restarted every RestartSec (#22). The
+// unit is WantedBy=graphical-session.target and so is not started for such
+// sessions by itself, but an explicit `systemctl --user start` (e.g. by
+// configuration management) still starts it. Any other type, including
+// "unspecified" or none, keeps snoopy running: without evidence it runs.
+func textOnly(sessions []logind.Session) bool {
+	n := 0
+	for _, s := range sessions {
+		if ignoredForGreeterCheck(s.Class) {
+			continue
+		}
+		if s.Type != "tty" {
+			return false
+		}
+		n++
 	}
-	return greeterOnly(sessions), nil
+	return n > 0
 }
 
-// inGreeterSession reports whether this process belongs to a display
-// manager's greeter user, asking logind on the system bus. Any failure is
-// logged in one line and reported as false so it never blocks recording.
-func inGreeterSession() bool {
+// skipReason asks src about uid's sessions and returns the message to log
+// when there is nothing for snoopy to record (a greeter, or text sessions
+// only), or "". A lookup error is returned for logging only, with "".
+func skipReason(src userSessionSource, uid uint32) (string, error) {
+	sessions, err := src.UserSessions(uid)
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case greeterOnly(sessions):
+		return greeterMessage, nil
+	case textOnly(sessions):
+		return textOnlyMessage, nil
+	}
+	return "", nil
+}
+
+// notRecordableSession returns why this process's user has nothing to
+// record (see skipReason), asking logind on the system bus, or "". Any
+// failure is logged in one line and reported as "" so it never blocks
+// recording.
+func notRecordableSession() string {
 	c, err := logind.Connect()
 	if err != nil {
-		log.Printf("Greeter check skipped (logind unavailable): %v", err)
-		return false
+		log.Printf("Session check skipped (logind unavailable): %v", err)
+		return ""
 	}
 	defer func() { _ = c.Close() }()
 	uid := uint32(os.Getuid()) //nolint:gosec // uids fit in uint32
-	greeter, err := isGreeterSession(c, uid)
+	reason, err := skipReason(c, uid)
 	if err != nil {
-		log.Printf("Greeter check skipped (logind query failed): %v", err)
-		return false
+		log.Printf("Session check skipped (logind query failed): %v", err)
+		return ""
 	}
-	return greeter
+	return reason
 }
 
 // greeterMessage is logged when snoopy declines to run in a greeter session.
 const greeterMessage = `Not recording: this is a display-manager greeter session (logind class "greeter"); exiting`
+
+// textOnlyMessage is logged when the user has only text sessions.
+const textOnlyMessage = `Not recording: this user has only text sessions (logind type "tty", e.g. a console or SSH) and no graphical session; exiting (snoopy starts with the graphical session)`

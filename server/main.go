@@ -462,7 +462,8 @@ func main() {
 // process exit code. Keeping os.Exit out of run lets deferred cleanup
 // (stopping the screencast, closing DBus connections, withdrawing the Avahi
 // record) always execute. It returns 0 without running anything in a
-// display-manager greeter session (see inGreeterSession).
+// display-manager greeter session or with only text sessions (see
+// notRecordableSession).
 func realMain() int {
 	res, err := resolveConfig(loadManagedFile(managedConfigPath), os.LookupEnv, os.Args[1:], os.Stderr)
 	if errors.Is(err, flag.ErrHelp) {
@@ -487,10 +488,12 @@ func realMain() int {
 	}
 
 	// A display manager's login screen runs its own user manager, which also
-	// starts a globally enabled unit. Exit 0 there (before HTTP, RTSP, Avahi
-	// or recording start) so Restart=on-failure leaves the unit inactive.
-	if inGreeterSession() {
-		log.Print(greeterMessage)
+	// starts a globally enabled unit, and the unit can be started explicitly
+	// for a user who has only text sessions (#22). Exit 0 there (before HTTP,
+	// RTSP, Avahi or recording start) so Restart=on-failure leaves the unit
+	// inactive.
+	if reason := notRecordableSession(); reason != "" {
+		log.Print(reason)
 		return 0
 	}
 
